@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# --- 0. 基础配置 ---
 CONF_FILE="/etc/gost/gost.json"
 BACKUP_DIR="/etc/gost/backups"
 
@@ -9,31 +8,35 @@ BACKUP_DIR="/etc/gost/backups"
 command -v jq &> /dev/null || (apt update && apt install jq -y || yum install jq -y)
 mkdir -p $BACKUP_DIR
 
-# --- 2. 深度自动匹配预览 (不锁定路径) ---
+# --- 2. 深度关联解析预览 (修复显示错位) ---
 clear
 echo "=============================="
-echo "    Gost 落地配置预览 (全解析模式)"
+echo "    Gost 落地配置预览 (智能关联版)"
 echo "=============================="
 
 if [ -s "$CONF_FILE" ]; then
     # 逻辑：
-    # 1. .. 深度递归寻找所有 addr 键
-    # 2. test("^[0-9]+\\.") 强制要求内容必须以数字开头并带点(IP特征)
-    # 3. 排除以 ":" 开头的端口号
+    # 1. 遍历 .services[] 每个对象
+    # 2. .addr 必定是监听端口
+    # 3. 在当前对象下递归查找所有带 "." 的 addr，作为落地 IP
     DATA=$(jq -r '
         .services[]? | . as $svc | 
-        $svc.addr as $port | 
-        ($svc | .. | .addr? | select(. != null and test("^[0-9]+\\.") and (contains(":") or test("^[0-9.]+$")))) as $ip |
-        "\($port) \t \($ip)"
+        ($svc.addr | sub("^:"; "")) as $p | 
+        [ $svc | .. | .addr? | select(. != null and contains(".")) ] | unique |
+        if length > 0 then
+            .[] | "\($p) \t \(.)"
+        else
+            "\($p) \t (暂无落地)"
+        end
     ' "$CONF_FILE" 2>/dev/null)
 
     if [ -z "$DATA" ]; then
-        echo "💡 提示：未能自动识别映射。请选 4 手动确认。"
+        echo "💡 提示：未能识别到有效的配置映射。"
     else
         echo -e "监听端口\t| 落地 IP 列表"
         echo "------------------------------------------"
-        # 统一清理冒号前缀和后缀，只留 IP
-        echo "$DATA" | sed 's/:[0-9]\{1,5\}//g; s/://g' | \
+        # 清理 IP 后缀并合并显示
+        echo "$DATA" | sed 's/:[0-9]\{1,5\}//g' | \
         awk '{a[$1]=a[$1] $2 ","} END {for(i in a) {sub(/,$/, "", a[i]); printf "%-15s | %s\n", i, a[i]}}' | sort -n
     fi
 else
@@ -54,17 +57,17 @@ apply_conf() {
         if gost -verify -F "$CONF_FILE" > /dev/null 2>&1; then
             ip link set dev $(ip route get 8.8.8.8 | awk '{print $5; exit}') mtu 1380
             systemctl restart gost
-            echo -e "\n✅ 修改已应用！"
+            echo -e "\n✅ 配置已生效！"
         else
-            echo -e "\n⚠️ Gost 校验失败，请选 4 检查语法。"
+            echo -e "\n⚠️ Gost 语法校验失败，请选 4 检查。"
         fi
     else
-        echo -e "\n❌ 严重：JSON 结构损坏，回滚修改。"
+        echo -e "\n❌ JSON 损坏，修改未保存。"
         rm -f "$temp"
     fi
 }
 
-# --- 4. 菜单 ---
+# --- 4. 交互菜单 ---
 echo "1) 增加/修改 (全结构适配)"
 echo "2) 删除端口"
 echo "3) 全局替换 IP"
@@ -74,14 +77,13 @@ read -p "选择 [1-5]: " OPT
 
 case $OPT in
     1)
-        read -p "端口: " PORT
+        read -p "端口 (如 12701): " PORT
         read -p "落地IP (逗号隔开): " IPS
         do_backup
         [ ! -s "$CONF_FILE" ] && echo '{"services": []}' > "$CONF_FILE"
         
-        IPS_JSON=$(echo $IPS | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++) printf "{\"addr\":\"%s:1002\"}%s", $i, (i==NF?"":",")}')
+        IPS_JSON=$(echo $IPS | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++) printf "{\"name\":\"node_%d\",\"addr\":\"%s:1002\"}%s", i, $i, (i==NF?"":",")}')
         
-        # 智能修改：不锁路径，哪里有 forwarder 改哪里，没有就建一个平级的
         jq --arg port ":$PORT" --argjson nodes "[$IPS_JSON]" \
         '(.services[]? | select(.addr == $port)) |= (
             if has("forwarder") then .forwarder.nodes = $nodes
@@ -89,9 +91,8 @@ case $OPT in
             else . + {forwarder: {nodes: $nodes}} end
         ) | 
         if (.services | any(.addr == $port)) then . 
-        else .services += [{name: ("svc"+$port), addr: $port, handler: {type: "relay"}, listener: {type: "tls"}, forwarder: {nodes: $nodes}}] end' \
+        else .services += [{name: ("svc"+($port|sub("^:"; ""))), addr: $port, handler: {type: "relay"}, listener: {type: "tls"}, forwarder: {nodes: $nodes}}] end' \
         "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
-        
         apply_conf
         ;;
     2)
