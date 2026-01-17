@@ -68,15 +68,16 @@ do_backup() { [ -f "$CONF_FILE" ] && cp "$CONF_FILE" "$BACKUP_DIR/gost_$(date +%
 # ---------- 安全应用 ----------
 apply_conf() {
     local TMP="$1"
-    gost -verify -F "$TMP" >/tmp/gost_verify.log 2>&1
+    echo "🔹 开始 Gost 校验..."
+    gost -verify -F "$TMP"
     if [ $? -eq 0 ]; then
         do_backup
         mv "$TMP" "$CONF_FILE"
         systemctl restart gost
         echo "✅ 配置已生效"
     else
-        echo "❌ 校验失败，修改未应用，详细错误如下："
-        cat /tmp/gost_verify.log
+        echo "❌ 校验失败，修改未应用，详细 Gost 错误如下："
+        gost -verify -F "$TMP"  # 直接输出到终端
         rm -f "$TMP"
     fi
 }
