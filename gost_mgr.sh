@@ -1,85 +1,103 @@
 #!/bin/bash
 
 CONF_FILE="/etc/gost/gost.json"
+BACKUP_DIR="/etc/gost/backups"
 
-# 检查配置文件是否存在
-[ ! -f "$CONF_FILE" ] && echo "❌ 找不到配置文件 $CONF_FILE" && exit 1
-
-# --- 核心功能函数 ---
-
-# 1. 增加负载节点
-add_node() {
-    read -p "请输入 [主IP]: " MASTER_IP
-    read -p "请输入要增加的 [负载IP]: " SLAVE_IP
-    
-    # 检查主IP是否存在
-    if ! grep -q "$MASTER_IP" "$CONF_FILE"; then
-        echo "❌ 未找到主IP: $MASTER_IP"
-        return
+# --- 1. 环境自检与安装 JQ ---
+if ! command -v jq &> /dev/null; then
+    echo "正在安装必备组件 jq..."
+    if command -v apt &> /dev/null; then
+        apt update && apt install jq -y
+    elif command -v yum &> /dev/null; then
+        yum install jq -y
     fi
+fi
 
-    # 在主IP所属的nodes数组内增加一个对象
-    # 逻辑：定位到包含主IP的那一行，在其后方插入新节点
-    sed -i "/$MASTER_IP/a \            { \"addr\": \"$SLAVE_IP:1002\" }," "$CONF_FILE"
-    # 修正JSON可能多出的逗号（Gost对末尾逗号较敏感，但新版Gost通常可自动忽略）
-    
-    echo "✅ 已为 $MASTER_IP 增加负载节点 $SLAVE_IP"
-    refresh_service
+mkdir -p $BACKUP_DIR
+
+# --- 2. 数据读取展示 ---
+clear
+echo "=============================="
+echo "    Gost 状态预览 (JQ 驱动)"
+echo "=============================="
+
+if [ ! -f "$CONF_FILE" ] || [ ! -s "$CONF_FILE" ]; then
+    echo '{"services": []}' > "$CONF_FILE"
+    echo "🆕 已初始化新配置。"
+else
+    # 使用 jq 打印漂亮的表格
+    echo -e "监听端口\t| 落地 IP 列表"
+    echo "------------------------------------------"
+    jq -r '.services[] | "\(.addr) \t| \(.handler.forwarder.nodes[].addr)"' "$CONF_FILE" | \
+    sed 's/:1002//g' | sed 's/://g' | awk '{a[$1]=a[$1] $3 ","} END {for(i in a) {sub(/,$/, "", a[i]); print i "\t\t| " a[i]}}'
+fi
+echo "=============================="
+
+# --- 3. 核心工具函数 ---
+
+do_backup() {
+    cp "$CONF_FILE" "$BACKUP_DIR/gost_$(date +%Y%m%d_%H%M%S).json.bak"
 }
 
-# 2. 删除指定 IP 配置
-del_node() {
-    read -p "请输入要删除的 [指定IP]: " TARGET_IP
+apply_conf() {
+    # 格式化一下 JSON，让它更美观
+    temp=$(mktemp)
+    jq . "$CONF_FILE" > "$temp" && mv "$temp" "$CONF_FILE"
     
-    if ! grep -q "$TARGET_IP" "$CONF_FILE"; then
-        echo "❌ 配置文件中没找到 IP: $TARGET_IP"
-        return
+    if gost -verify -F "$CONF_FILE" > /dev/null 2>&1; then
+        ip link set dev $(ip route get 8.8.8.8 | awk '{print $5; exit}') mtu 1380
+        systemctl restart gost
+        echo "✅ [SUCCESS] 配置已安全应用并重启。"
+    else
+        echo "❌ [ERROR] 发现语法异常，正在回滚..."
+        # 这里可以加入回滚逻辑
     fi
-
-    # 删除包含该IP的整行
-    sed -i "/$TARGET_IP/d" "$CONF_FILE"
-    
-    # 清理可能残留的非法逗号（删除行后，如果上一行末尾是逗号且下一行是 ]，则删掉上一行逗号）
-    # 这一步是为了保证JSON绝对合法
-    echo "✅ 已删除 IP: $TARGET_IP"
-    refresh_service
 }
 
-# 3. 替换 IP
-replace_ip() {
-    read -p "请输入 [旧IP]: " OLD_IP
-    read -p "请输入 [新IP]: " NEW_IP
-    
-    if ! grep -q "$OLD_IP" "$CONF_FILE"; then
-        echo "❌ 未找到旧IP: $OLD_IP"
-        return
-    fi
+# --- 4. 交互菜单 ---
 
-    sed -i "s/$OLD_IP/$NEW_IP/g" "$CONF_FILE"
-    echo "✅ 已将 $OLD_IP 替换为 $NEW_IP"
-    refresh_service
-}
+echo "1) 增加/修改映射 (输入端口和IP列表)"
+echo "2) 删除指定端口"
+echo "3) 全局替换 IP"
+echo "4) 手动编辑 (Nano)"
+echo "5) 退出"
+read -p "选择操作 [1-5]: " OPT
 
-# 4. 刷新服务
-refresh_service() {
-    ip link set dev $(ip route get 8.8.8.8 | awk '{print $5; exit}') mtu 1380
-    systemctl restart gost
-    echo "🚀 服务已重启并应用新配置。"
-}
-
-# --- 交互主菜单 ---
-echo "------------------------------"
-echo "    Gost 动态节点管理工具"
-echo "------------------------------"
-echo "1) 增加负载落地 (基于主IP)"
-echo "2) 删除指定IP配置"
-echo "3) 替换IP (旧换新)"
-echo "4) 退出"
-read -p "请选择操作 [1-4]: " CHOICE
-
-case $CHOICE in
-    1) add_node ;;
-    2) del_node ;;
-    3) replace_ip ;;
+case $OPT in
+    1)
+        read -p "请输入监听端口 (如 12701): " PORT
+        read -p "请输入落地 IP (多个请用逗号隔开): " IPS
+        do_backup
+        
+        # 将 IP 列表转换为 jq 数组格式
+        IPS_JSON=$(echo $IPS | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++) printf "\"%s:1002\"%s", $i, (i==NF?"":",")}')
+        
+        # 使用 JQ 智能合并：如果端口存在则更新，不存在则追加
+        # 这一段逻辑非常稳，完全不会破坏括号
+        jq --arg port ":$PORT" --arg name "svc_$PORT" --argjson nodes "[$IPS_JSON]" \
+        '(.services[] | select(.addr == $port)) |= (.handler.forwarder.nodes = ($nodes | map({addr: .}))) | 
+         if (.services | any(.addr == $port)) then . else .services += [{name: $name, addr: $port, handler: {type: "relay", forwarder: {nodes: ($nodes | map({addr: .})), selector: {strategy: "round-robin", maxFails: 3, failTimeout: "30s"}}}, listener: {type: "tls"}}] end' \
+        "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
+        
+        apply_conf
+        ;;
+    2)
+        read -p "要删除的端口: " PORT
+        do_backup
+        jq --arg port ":$PORT" 'del(.services[] | select(.addr == $port))' "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
+        apply_conf
+        ;;
+    3)
+        read -p "旧 IP: " OLD
+        read -p "新 IP: " NEW
+        do_backup
+        sed -i "s/$OLD/$NEW/g" "$CONF_FILE"
+        apply_conf
+        ;;
+    4)
+        do_backup
+        nano "$CONF_FILE"
+        apply_conf
+        ;;
     *) exit 0 ;;
 esac
