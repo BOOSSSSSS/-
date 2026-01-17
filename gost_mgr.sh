@@ -29,7 +29,7 @@ flag() {
     esac
 }
 
-# ---------- IP → 地区（中文 + 缓存） ----------
+# ---------- IP → 中文地区（带缓存） ----------
 get_ip_region() {
     local ip="$1"
     if grep -q "^$ip|" "$IP_CACHE" 2>/dev/null; then
@@ -41,7 +41,6 @@ get_ip_region() {
     country=$(echo "$info" | jq -r '.country // "?"')
     region=$(echo "$info" | jq -r '.region // ""')
     city=$(echo "$info" | jq -r '.city // ""')
-    # 中文显示：country + region + city
     local cname
     case "$country" in
         CN) cname="中国" ;;
@@ -69,12 +68,19 @@ do_backup() {
     [ -f "$CONF_FILE" ] && cp "$CONF_FILE" "$BACKUP_DIR/gost_$(date +%F_%T).bak"
 }
 
+rollback() {
+    if [ -f "$BACKUP" ]; then
+        cp "$BACKUP" "$CONF_FILE"
+        echo "⚠️ 校验失败，已回滚到备份"
+    fi
+}
+
 apply_conf() {
     if gost -verify -F "$CONF_FILE" >/dev/null 2>&1; then
         systemctl restart gost
         echo "✅ 配置已生效"
     else
-        echo "❌ Gost 校验失败"
+        rollback
     fi
 }
 
@@ -133,7 +139,6 @@ read -p "选择 [1-5 / 1a]: " OPT
 
 # ---------- 按地区安全操作函数 ----------
 region_ip_modify() {
-    # USER_IPS, ACT 已定义
     for ip in $(jq -r '.services[].forwarder.nodes[].addr | sub(":1002$"; "")' "$CONF_FILE"); do
         r=$(get_ip_region "$ip")
         if [[ "$r" == "$REGION" ]]; then
@@ -166,14 +171,26 @@ region_ip_modify() {
             done
         fi
     done
+
+    # 校验 + 回滚
+    BACKUP="$BACKUP_DIR/gost_$(date +%F_%T).json.bak"
+    cp "$CONF_FILE" "$BACKUP"
+    if gost -verify -F "$CONF_FILE" >/dev/null 2>&1; then
+        systemctl restart gost
+        echo "✅ 操作成功，配置已生效"
+    else
+        rollback
+    fi
 }
 
 # ---------- 主菜单 ----------
+BACKUP="$BACKUP_DIR/gost_$(date +%F_%T).json.bak"
+do_backup
+
 case "$OPT" in
 1)
     read -p "端口: " PORT
     read -p "IP (逗号): " IPS
-    do_backup
     [ ! -s "$CONF_FILE" ] && echo '{"services":[]}' > "$CONF_FILE"
     NODES=$(echo "$IPS" | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++)printf "{\"name\":\"node_%d\",\"addr\":\"%s:1002\"}%s",i,$i,(i==NF?"":",")}')
     jq --arg port ":$PORT" --argjson nodes "[$NODES]" '
@@ -188,7 +205,7 @@ case "$OPT" in
                 forwarder:{selector:{strategy:"fifo",maxFails:1,failTimeout:600000000000},nodes:$nodes}
             }]
         end
-    ' "$CONF_FILE" > "$CONF_FILE.tmp" && mv "$CONF_FILE.tmp" "$CONF_FILE"
+    ' "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
     apply_conf
     ;;
 1a)
@@ -207,25 +224,20 @@ case "$OPT" in
     echo "3) 替换 IP"
     read -p "选择 [1-3]: " ACT
     read -p "输入 IP（逗号分隔）: " USER_IPS
-    do_backup
     region_ip_modify
-    apply_conf
     ;;
 2)
     read -p "删除端口: " PORT
-    do_backup
-    jq 'del(.services[] | select(.addr==":'"$PORT"'"))' "$CONF_FILE" > "$CONF_FILE.tmp" && mv "$CONF_FILE.tmp" "$CONF_FILE"
+    jq 'del(.services[] | select(.addr==":'"$PORT"'"))' "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
     apply_conf
     ;;
 3)
     read -p "旧 IP: " OLD
     read -p "新 IP: " NEW
-    do_backup
     sed -i "s/$OLD/$NEW/g" "$CONF_FILE"
     apply_conf
     ;;
 4)
-    do_backup
     nano "$CONF_FILE"
     apply_conf
     ;;
