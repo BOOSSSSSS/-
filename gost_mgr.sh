@@ -8,34 +8,32 @@ BACKUP_DIR="/etc/gost/backups"
 command -v jq &> /dev/null || (apt update && apt install jq -y || yum install jq -y)
 mkdir -p $BACKUP_DIR
 
-# --- 2. 深度关联解析预览 (修复显示错位) ---
+# --- 2. 精准关联解析 (彻底解决监听/落地显示反转) ---
 clear
 echo "=============================="
-echo "    Gost 落地配置预览 (智能关联版)"
+echo "    Gost 落地配置预览"
 echo "=============================="
 
 if [ -s "$CONF_FILE" ]; then
     # 逻辑：
-    # 1. 遍历 .services[] 每个对象
-    # 2. .addr 必定是监听端口
-    # 3. 在当前对象下递归查找所有带 "." 的 addr，作为落地 IP
+    # 1. 明确定义 $p 是服务的最外层监听地址 .addr
+    # 2. 明确定义 $ips 是在 forwarder 下面找节点的 addr
     DATA=$(jq -r '
-        .services[]? | . as $svc | 
-        ($svc.addr | sub("^:"; "")) as $p | 
-        [ $svc | .. | .addr? | select(. != null and contains(".")) ] | unique |
-        if length > 0 then
-            .[] | "\($p) \t \(.)"
-        else
-            "\($p) \t (暂无落地)"
-        end
+        .services[]? | . as $svc |
+        ($svc.addr | sub("^:"; "")) as $p |
+        [
+          ($svc.forwarder.nodes[]?.addr // empty),
+          ($svc.handler.forwarder.nodes[]?.addr // empty)
+        ] | unique | .[] as $ip |
+        "\($p) \t \($ip)"
     ' "$CONF_FILE" 2>/dev/null)
 
     if [ -z "$DATA" ]; then
-        echo "💡 提示：未能识别到有效的配置映射。"
+        echo "💡 提示：未能解析到配置。请检查文件是否存在 services 数组。"
     else
         echo -e "监听端口\t| 落地 IP 列表"
         echo "------------------------------------------"
-        # 清理 IP 后缀并合并显示
+        # 提取结果中清理 IP 的端口后缀（如 :1002）
         echo "$DATA" | sed 's/:[0-9]\{1,5\}//g' | \
         awk '{a[$1]=a[$1] $2 ","} END {for(i in a) {sub(/,$/, "", a[i]); printf "%-15s | %s\n", i, a[i]}}' | sort -n
     fi
@@ -57,9 +55,9 @@ apply_conf() {
         if gost -verify -F "$CONF_FILE" > /dev/null 2>&1; then
             ip link set dev $(ip route get 8.8.8.8 | awk '{print $5; exit}') mtu 1380
             systemctl restart gost
-            echo -e "\n✅ 配置已生效！"
+            echo -e "\n✅ 配置已成功应用！"
         else
-            echo -e "\n⚠️ Gost 语法校验失败，请选 4 检查。"
+            echo -e "\n⚠️ Gost 校验失败，请选 4 检查语法。"
         fi
     else
         echo -e "\n❌ JSON 损坏，修改未保存。"
@@ -68,7 +66,7 @@ apply_conf() {
 }
 
 # --- 4. 交互菜单 ---
-echo "1) 增加/修改 (全结构适配)"
+echo "1) 增加/修改 (自动兼容层级)"
 echo "2) 删除端口"
 echo "3) 全局替换 IP"
 echo "4) 手动编辑 (Nano)"
@@ -82,16 +80,18 @@ case $OPT in
         do_backup
         [ ! -s "$CONF_FILE" ] && echo '{"services": []}' > "$CONF_FILE"
         
+        # 构建节点数组
         IPS_JSON=$(echo $IPS | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++) printf "{\"name\":\"node_%d\",\"addr\":\"%s:1002\"}%s", i, $i, (i==NF?"":",")}')
         
+        # 智能修改：支持平级 forwarder 或 handler 内的 forwarder
         jq --arg port ":$PORT" --argjson nodes "[$IPS_JSON]" \
         '(.services[]? | select(.addr == $port)) |= (
             if has("forwarder") then .forwarder.nodes = $nodes
             elif (.handler | has("forwarder")) then .handler.forwarder.nodes = $nodes
-            else . + {forwarder: {nodes: $nodes}} end
+            else . + {forwarder: {selector: {strategy: "fifo", maxFails: 1, failTimeout: 600000000000}, nodes: $nodes}} end
         ) | 
         if (.services | any(.addr == $port)) then . 
-        else .services += [{name: ("svc"+($port|sub("^:"; ""))), addr: $port, handler: {type: "relay"}, listener: {type: "tls"}, forwarder: {nodes: $nodes}}] end' \
+        else .services += [{name: ($port|sub("^:"; "")+"_tls"), addr: $port, handler: {type: "relay"}, listener: {type: "tls"}, forwarder: {selector: {strategy: "fifo", maxFails: 1, failTimeout: 600000000000}, nodes: $nodes}}] end' \
         "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
         apply_conf
         ;;
