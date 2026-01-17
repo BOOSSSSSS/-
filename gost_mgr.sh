@@ -29,7 +29,7 @@ flag() {
     esac
 }
 
-# ---------- IP → 地区（带缓存） ----------
+# ---------- IP → 地区（中文 + 缓存） ----------
 get_ip_region() {
     local ip="$1"
     if grep -q "^$ip|" "$IP_CACHE" 2>/dev/null; then
@@ -41,9 +41,26 @@ get_ip_region() {
     country=$(echo "$info" | jq -r '.country // "?"')
     region=$(echo "$info" | jq -r '.region // ""')
     city=$(echo "$info" | jq -r '.city // ""')
+    # 中文显示：country + region + city
+    local cname
+    case "$country" in
+        CN) cname="中国" ;;
+        US) cname="美国" ;;
+        JP) cname="日本" ;;
+        KR) cname="韩国" ;;
+        SG) cname="新加坡" ;;
+        HK) cname="香港" ;;
+        TW) cname="台湾" ;;
+        DE) cname="德国" ;;
+        FR) cname="法国" ;;
+        GB) cname="英国" ;;
+        IT) cname="意大利" ;;
+        NL) cname="荷兰" ;;
+        *) cname="$country" ;;
+    esac
     local f
     f=$(flag "$country")
-    local text="$f $country $region $city"
+    local text="$f $cname $region $city"
     echo "$ip|$text" >> "$IP_CACHE"
     echo "$text"
 }
@@ -64,7 +81,7 @@ apply_conf() {
 # ---------- 预览 ----------
 clear
 echo "=============================="
-echo "   Gost 落地配置预览（运维版）"
+echo "   Gost 落地配置预览（中文版运维版）"
 echo "=============================="
 echo "监听端口 | 落地 IP（地区 / 复用）"
 echo "------------------------------------------"
@@ -114,6 +131,44 @@ echo "4) 手动编辑 (Nano)"
 echo "5) 退出"
 read -p "选择 [1-5 / 1a]: " OPT
 
+# ---------- 按地区安全操作函数 ----------
+region_ip_modify() {
+    # USER_IPS, ACT 已定义
+    for ip in $(jq -r '.services[].forwarder.nodes[].addr | sub(":1002$"; "")' "$CONF_FILE"); do
+        r=$(get_ip_region "$ip")
+        if [[ "$r" == "$REGION" ]]; then
+            PORTS=$(jq -r --arg IP "$ip" '.services[] | select(.forwarder.nodes[].addr | sub(":1002$"; "")==$IP) | .addr' "$CONF_FILE")
+            for p in $PORTS; do
+                case "$ACT" in
+                1)  # 增加 IP
+                    for NEW_IP in $(echo $USER_IPS | tr ',' ' '); do
+                        EXISTS=$(jq --arg port "$p" --arg ip "$NEW_IP" '.services[] | select(.addr==$port) | .forwarder.nodes[] | select(.addr==($ip+":1002"))' "$CONF_FILE")
+                        if [ -z "$EXISTS" ]; then
+                            NODE_NAME="node_$(date +%s%N)"
+                            jq --arg port "$p" --arg ip "$NEW_IP" --arg name "$NODE_NAME" \
+                               '(.services[] | select(.addr==$port) | .forwarder.nodes) += [{"name":$name,"addr":($ip+":1002")}]' \
+                               "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
+                        fi
+                    done
+                    ;;
+                2)  # 删除 IP
+                    for DEL_IP in $(echo $USER_IPS | tr ',' ' '); do
+                        jq --arg port "$p" --arg ip "$DEL_IP" \
+                           '(.services[] | select(.addr==$port) | .forwarder.nodes) |= map(select(.addr != ($ip+":1002")))' \
+                           "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
+                    done
+                    ;;
+                3)  # 替换 IP
+                    NODES=$(echo "$USER_IPS" | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++)printf "{\"name\":\"node_%d\",\"addr\":\"%s:1002\"}%s",i,$i,(i==NF?"":",")}')
+                    jq --arg port "$p" --argjson nodes "[$NODES]" '(.services[] | select(.addr==$port) | .forwarder.nodes)=$nodes' "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
+                    ;;
+                esac
+            done
+        fi
+    done
+}
+
+# ---------- 主菜单 ----------
 case "$OPT" in
 1)
     read -p "端口: " PORT
@@ -137,7 +192,6 @@ case "$OPT" in
     apply_conf
     ;;
 1a)
-    # ---------- 按地区操作 ----------
     echo "可操作地区列表："
     mapfile -t REGION_LIST < <(
         jq -r '.services[].forwarder.nodes[].addr | sub(":1002$"; "")' "$CONF_FILE" | while read ip; do get_ip_region "$ip"; done | sort -u
@@ -154,34 +208,7 @@ case "$OPT" in
     read -p "选择 [1-3]: " ACT
     read -p "输入 IP（逗号分隔）: " USER_IPS
     do_backup
-    # 遍历 JSON 找出该地区所有端口
-    for ip in $(jq -r '.services[].forwarder.nodes[].addr | sub(":1002$"; "")' "$CONF_FILE"); do
-        r=$(get_ip_region "$ip")
-        if [[ "$r" == "$REGION" ]]; then
-            PORTS=$(jq -r --arg IP "$ip" '.services[] | select(.forwarder.nodes[].addr | sub(":1002$"; "")==$IP) | .addr' "$CONF_FILE")
-            for p in $PORTS; do
-                case "$ACT" in
-                1)  # 增加 IP
-                    for NEW_IP in $(echo $USER_IPS | tr ',' ' '); do
-                        EXISTS=$(jq --arg port "$p" --arg ip "$NEW_IP" '.services[] | select(.addr==$port) | .forwarder.nodes[] | select(.addr==($ip+":1002"))' "$CONF_FILE")
-                        if [ -z "$EXISTS" ]; then
-                            jq --arg port "$p" --arg ip "$NEW_IP" '(.services[] | select(.addr==$port) | .forwarder.nodes) += [{"name":"node_add","addr":($ip+":1002")}]' "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
-                        fi
-                    done
-                    ;;
-                2)  # 删除 IP
-                    for DEL_IP in $(echo $USER_IPS | tr ',' ' '); do
-                        jq --arg port "$p" --arg ip "$DEL_IP" '(.services[] | select(.addr==$port) | .forwarder.nodes) |= map(select(.addr != ($ip+":1002")))' "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
-                    done
-                    ;;
-                3)  # 替换 IP
-                    NODES=$(echo "$USER_IPS" | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++)printf "{\"name\":\"node_%d\",\"addr\":\"%s:1002\"}%s",i,$i,(i==NF?"":",")}')
-                    jq --arg port "$p" --argjson nodes "[$NODES]" '(.services[] | select(.addr==$port) | .forwarder.nodes)=$nodes' "$CONF_FILE" > "${CONF_FILE}.tmp" && mv "${CONF_FILE}.tmp" "$CONF_FILE"
-                    ;;
-                esac
-            done
-        fi
-    done
+    region_ip_modify
     apply_conf
     ;;
 2)
