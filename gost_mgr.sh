@@ -68,14 +68,16 @@ do_backup() { [ -f "$CONF_FILE" ] && cp "$CONF_FILE" "$BACKUP_DIR/gost_$(date +%
 # ---------- 安全应用 ----------
 apply_conf() {
     local TMP="$1"
-    if gost -verify -F "$TMP" >/dev/null 2>&1; then
+    gost -verify -F "$TMP" >/tmp/gost_verify.log 2>&1
+    if [ $? -eq 0 ]; then
         do_backup
         mv "$TMP" "$CONF_FILE"
         systemctl restart gost
         echo "✅ 配置已生效"
     else
+        echo "❌ 校验失败，修改未应用，详细错误如下："
+        cat /tmp/gost_verify.log
         rm -f "$TMP"
-        echo "❌ 校验失败，修改未应用"
     fi
 }
 
@@ -158,8 +160,12 @@ region_ip_modify() {
                     done
                     ;;
                 3) # 替换 IP
-                    NODES=$(echo "$USER_IPS" | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++)printf "{\"name\":\"node_%d\",\"addr\":\"%s:1002\"}%s",i,$i,(i==NF?"":",")}')
-                    jq --arg port "$p" --argjson nodes "[$NODES]" '(.services[] | select(.addr==$port) | .forwarder.nodes)=$nodes' "$TMP" > "${TMP}.tmp" && mv "${TMP}.tmp" "$TMP"
+                    for REPL_IP in $(echo $USER_IPS | tr ',' ' '); do
+                        NODE_NAME="node_$(date +%s%N)"
+                        jq --arg port "$p" --arg ip "$REPL_IP" --arg name "$NODE_NAME" \
+                           '(.services[] | select(.addr==$port) | .forwarder.nodes) = [{"name":$name,"addr":($ip+":1002")}]' \
+                           "$TMP" > "${TMP}.tmp" && mv "${TMP}.tmp" "$TMP"
+                    done
                     ;;
                 esac
             done
@@ -176,20 +182,21 @@ case "$OPT" in
     [ ! -s "$CONF_FILE" ] && echo '{"services":[]}' > "$CONF_FILE"
     TMP=$(mktemp)
     cp "$CONF_FILE" "$TMP"
-    NODES=$(echo "$IPS" | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++)printf "{\"name\":\"node_%d\",\"addr\":\"%s:1002\"}%s",i,$i,(i==NF?"":",")}')
-    jq --arg port ":$PORT" --argjson nodes "[$NODES]" '
-        if (.services | any(.addr==$port)) then
-            (.services[] | select(.addr==$port) | .forwarder.nodes)=$nodes
-        else
-            .services += [{
-                name: "auto_'$PORT'",
-                addr: $port,
-                handler:{type:"relay"},
-                listener:{type:"tls"},
-                forwarder:{selector:{strategy:"fifo",maxFails:1,failTimeout:600000000000},nodes:$nodes}
-            }]
-        end
-    ' "$TMP" > "${TMP}.tmp" && mv "${TMP}.tmp" "$TMP"
+    for NEW_IP in $(echo "$IPS" | tr ',' ' '); do
+        NODE_NAME="node_$(date +%s%N)"
+        jq --arg port ":$PORT" --arg ip "$NEW_IP" --arg name "$NODE_NAME" \
+           'if (.services | any(.addr==$port)) then
+                (.services[] | select(.addr==$port) | .forwarder.nodes) += [{"name":$name,"addr":($ip+":1002")}]
+            else
+                .services += [{
+                    name: "auto_'$PORT'",
+                    addr: $port,
+                    handler:{type:"relay"},
+                    listener:{type:"tls"},
+                    forwarder:{selector:{strategy:"fifo",maxFails:1,failTimeout:600000000000},nodes:[{"name":$name,"addr":($ip+":1002")}]}
+                }]
+            end' "$TMP" > "${TMP}.tmp" && mv "${TMP}.tmp" "$TMP"
+    done
     apply_conf "$TMP"
     ;;
 1a)
