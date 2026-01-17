@@ -4,7 +4,7 @@
 # CF-SuperTool v4.0 - 终极全能运维版
 # ==========================================================
 # [配置区]
-ZONE_ID="你的_ZONE_ID"
+ZONE_ID="ae7b890d063bed0b4259242c8ea78d5a"
 CONF_FILE="$HOME/.cf_supertool.conf"
 LOG_FILE="./cf_ops.log"
 # TG_TOKEN="你的机器人TOKEN" # 可选
