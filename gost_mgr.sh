@@ -65,21 +65,19 @@ get_ip_region() {
 # ---------- 备份 ----------
 do_backup() { [ -f "$CONF_FILE" ] && cp "$CONF_FILE" "$BACKUP_DIR/gost_$(date +%F_%T).bak"; }
 
-# ---------- 安全应用 ----------
+# ---------- 安全应用（systemd） ----------
 apply_conf() {
     local TMP="$1"
-    echo "🔹 开始 Gost 校验..."
-    
-    gost -verify -F "$TMP" 2>&1
+    do_backup
+    cp "$TMP" "$CONF_FILE"
+
+    systemctl restart gost
     if [ $? -eq 0 ]; then
-        do_backup
-        mv "$TMP" "$CONF_FILE"
-        systemctl restart gost
         echo "✅ 配置已生效，服务已重启"
     else
-        echo "❌ 校验失败，修改未应用，详细 Gost 错误如下："
-        gost -verify -F "$TMP" 2>&1
-        rm -f "$TMP"
+        echo "❌ 服务重启失败，回滚到备份"
+        LATEST_BAK=$(ls -t "$BACKUP_DIR"/gost_*.bak | head -1)
+        [ -f "$LATEST_BAK" ] && cp "$LATEST_BAK" "$CONF_FILE"
     fi
 }
 
