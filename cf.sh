@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==========================================================
-# CF-SuperTool v5.2 - 增强全能版 (支持类型转换)
-# 功能：支持修改 DNS 记录类型 (A, CNAME, TXT 等)
+# CF-SuperTool v5.3 - 增强全能版 (支持中文域名)
+# 功能：支持修改 DNS 记录类型及中文域名自动转码 (Punycode)
 # ==========================================================
 
 # [配置区]
@@ -15,17 +15,24 @@ Y='\033[1;33m'
 B='\033[0;34m'
 NC='\033[0m'
 
-# --- 1. 环境自检 ---
+# --- 1. 环境自检 (新增 idn2 检查) ---
 check_env() {
+    # 检查 jq
     if ! command -v jq &> /dev/null; then
         echo -e "${Y}[!] 正在安装依赖 jq...${NC}"
         if [[ -f /etc/debian_version ]]; then
             sudo apt-get update && sudo apt-get install -y jq
         elif [[ -f /etc/redhat-release ]]; then
             sudo yum install -y jq
-        else
-            echo -e "${R}[X] 无法自动安装 jq，请手动安装。${NC}"
-            exit 1
+        fi
+    fi
+    # 检查 idn2 (用于处理中文域名)
+    if ! command -v idn2 &> /dev/null; then
+        echo -e "${Y}[!] 正在安装域名转码工具 idn2...${NC}"
+        if [[ -f /etc/debian_version ]]; then
+            sudo apt-get install -y idn2
+        elif [[ -f /etc/redhat-release ]]; then
+            sudo yum install -y libidn2
         fi
     fi
 }
@@ -48,7 +55,6 @@ fetch_records() {
     echo -e "${Y}[*] 正在拉取数据...${NC}"
     RECORDS_JSON=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?per_page=100" \
         -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json")
-    
     if [[ $(echo "$RECORDS_JSON" | jq -r '.success') != "true" ]]; then
         echo -e "${R}❌ API 验证失败！${NC}"
         rm -f "$CONF_FILE"
@@ -56,7 +62,7 @@ fetch_records() {
     fi
 }
 
-# --- 4. 修改记录功能 (核心升级部分) ---
+# --- 4. 修改记录功能 (已升级支持中文转码) ---
 update_record() {
     fetch_records
     echo "--------------------------------------------------------------------------------"
@@ -64,7 +70,6 @@ update_record() {
     echo "--------------------------------------------------------------------------------"
     echo "$RECORDS_JSON" | jq -r '.result | keys[] as $i | "[\($i)]\t\(.[$i].type)\t\(.[$i].proxied)\t\(.[$i].name)\t\(.[$i].content)"' | expand -t 8
     echo "--------------------------------------------------------------------------------"
-    
     read -p "请输入要操作的索引号: " INDEX < /dev/tty
     SELECTED=$(echo "$RECORDS_JSON" | jq -r ".result[$INDEX]")
     [[ "$SELECTED" == "null" ]] && { echo -e "${R}无效索引${NC}"; return; }
@@ -82,29 +87,31 @@ update_record() {
     echo "4) 转换记录类型 (例如 A -> CNAME)"
     read -p "请选择 [1-4]: " ACT < /dev/tty
 
-    # 初始化为当前值
     NEW_IP=$RCONTENT
     NEW_P=$RPROXIED
     NEW_TYPE=$RTYPE
 
     case $ACT in
-        1) 
-            read -p "新内容: " NEW_IP < /dev/tty ;;
-        2) 
-            NEW_IP=$(curl -s https://api.ipify.org)
-            echo "本机 IP: $NEW_IP" ;;
-        3) 
-            [[ "$RPROXIED" == "true" ]] && NEW_P=false || NEW_P=true ;;
-        4)
-            read -p "请输入新类型 (A/CNAME/TXT/AAAA): " NEW_TYPE < /dev/tty
-            NEW_TYPE=$(echo "$NEW_TYPE" | tr '[:lower:]' '[:upper:]')
-            read -p "请输入新内容 (CNAME填域名/A填IP): " NEW_IP < /dev/tty ;;
+        1) read -p "新内容: " NEW_IP < /dev/tty ;;
+        2) NEW_IP=$(curl -s https://api.ipify.org)
+           echo "本机 IP: $NEW_IP" ;;
+        3) [[ "$RPROXIED" == "true" ]] && NEW_P=false || NEW_P=true ;;
+        4) read -p "请输入新类型 (A/CNAME/TXT/AAAA): " NEW_TYPE < /dev/tty
+           NEW_TYPE=$(echo "$NEW_TYPE" | tr '[:lower:]' '[:upper:]')
+           read -p "请输入新内容 (CNAME填域名/A填IP): " NEW_IP < /dev/tty ;;
         *) return ;;
     esac
 
+    # --- 核心处理：中文域名/内容自动转码 ---
+    # 如果输入的新内容包含中文（主要针对 CNAME 指向中文域名），自动转码
+    if [[ "$NEW_IP" =~ [^[:ascii:]] ]]; then
+        NEW_IP=$(echo "$NEW_IP" | idn2)
+    fi
+    # -----------------------------------
+
     # 构造并提交数据
     DATA=$(jq -n --arg t "$NEW_TYPE" --arg n "$RNAME" --arg c "$NEW_IP" --argjson p "$NEW_P" \
-          '{type:$t,name:$n,content:$c,ttl:1,proxied:$p}')
+        '{type:$t,name:$n,content:$c,ttl:1,proxied:$p}')
 
     RES=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RID" \
         -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" --data "$DATA")
@@ -136,7 +143,7 @@ main_menu() {
     check_env
     get_auth
     while true; do
-        echo -e "\n${B}CF-SuperTool v5.2 控制台${NC}"
+        echo -e "\n${B}CF-SuperTool v5.3 控制台${NC}"
         echo "1. 管理/转换 DNS 记录"
         echo "2. 批量 Ping 检测 (仅限A记录)"
         echo "5. 清除 Token"
