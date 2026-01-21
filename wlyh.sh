@@ -23,7 +23,6 @@ net.netfilter.nf_conntrack_generic_timeout = 600
 
 # ===== TCP 连接重用（减少TIME_WAIT）=====
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_tw_recycle = 0  # 禁用，可能导致NAT问题
 net.ipv4.tcp_max_tw_buckets = 2000000
 net.ipv4.tcp_fin_timeout = 30
 
@@ -55,13 +54,24 @@ net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_keepalive_time = 1800
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
+
+# ===== 多路径支持 =====
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.accept_local = 1
+net.ipv4.conf.default.accept_local = 1
+
+# ===== IPv6 支持 =====
+net.ipv6.conf.all.disable_ipv6 = 0
+net.ipv6.conf.default.disable_ipv6 = 0
 EOF
 
 # 加载内核模块
 modprobe -q nf_conntrack || true
 modprobe -q nf_conntrack_ipv4 || true
 
-sysctl -p /etc/sysctl.d/99-ix-core.conf >/dev/null
+# 使用 -e 参数忽略不存在的参数错误
+sysctl -e -p /etc/sysctl.d/99-ix-core.conf >/dev/null 2>&1 || true
 
 echo "[INFO] 内核参数已加载"
 
@@ -145,7 +155,7 @@ EOF
 chattr +i /etc/resolv.conf 2>/dev/null || true
 
 # ===============================
-# 4. 创建智能连接跟踪监控（而不是粗暴清理）
+# 4. 创建智能连接跟踪监控
 # ===============================
 cat >/usr/local/bin/monitor-conntrack.sh <<'EOF'
 #!/bin/bash
@@ -359,7 +369,7 @@ echo "2. 智能分时段清理策略："
 echo "   - 高峰期（8:00-23:00）：只清理超时连接"
 echo "   - 非高峰期：执行深度清理"
 echo "   - 每周日4:00：执行维护清理"
-echo "3. 连接重用优化：减少 TIME_WAIT 状态"
+echo "3. 移除了已废弃的 tcp_tw_recycle 参数"
 echo "4. 添加只读监控脚本，不自动清理"
 echo ""
 echo "监控命令："
@@ -380,3 +390,13 @@ echo "--------------------------------------"
 
 # 初始运行一次监控
 /usr/local/bin/monitor-conntrack.sh >/dev/null 2>&1
+
+# ===============================
+# 7. 验证配置
+# ===============================
+echo "[INFO] 验证当前配置..."
+echo "1. Unbound 状态: $(systemctl is-active unbound)"
+echo "2. 连接跟踪表大小: $(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo '未启用')"
+echo "3. 当前连接数: $(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 'N/A')"
+echo "4. DNS 解析测试: $(dig @127.0.0.1 baidu.com +short 2>/dev/null | head -1 || echo '失败')"
+echo "[INFO] 优化完成！建议重启服务器使所有配置生效。"
