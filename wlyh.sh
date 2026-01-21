@@ -76,10 +76,20 @@ sysctl -e -p /etc/sysctl.d/99-ix-core.conf >/dev/null 2>&1 || true
 echo "[INFO] 内核参数已加载"
 
 # ===============================
-# 2. 安装并优化 unbound
+# 2. 安装并优化 unbound（修复版本）
 # ===============================
+echo "[INFO] 安装和配置 unbound DNS..."
+
+# 安装必要的工具
+apt update
+apt install -y dnsutils curl wget || true
+
+# 停止并禁用 systemd-resolved
+systemctl stop systemd-resolved 2>/dev/null || true
+systemctl disable systemd-resolved 2>/dev/null || true
+
+# 安装 unbound
 if ! command -v unbound &>/dev/null; then
-    apt update
     apt install -y unbound unbound-anchor
 fi
 
@@ -89,314 +99,299 @@ cp /etc/unbound/unbound.conf /etc/unbound/unbound.conf.backup 2>/dev/null || tru
 # 获取 CPU 核心数
 CPU_CORES=$(nproc)
 THREADS=$((CPU_CORES * 2))
-if [ $THREADS -gt 16 ]; then
-    THREADS=16
+if [ $THREADS -gt 8 ]; then
+    THREADS=8
 fi
 
+# 创建简化但稳定的 unbound 配置
 cat >/etc/unbound/unbound.conf <<EOF
 server:
+    # 基本设置
+    verbosity: 1
     interface: 0.0.0.0
     interface: ::0
-    access-control: 0.0.0.0/0 allow
     port: 53
     do-ip4: yes
+    do-ip6: yes
     do-udp: yes
     do-tcp: yes
     
-    # 性能优化
+    # 访问控制
+    access-control: 0.0.0.0/0 allow
+    access-control: ::/0 allow
+    
+    # 性能设置
     num-threads: ${THREADS}
     so-reuseport: yes
-    outgoing-range: 8192
-    num-queries-per-thread: 4096
-    
-    # 缓存
-    msg-cache-size: 256m
-    rrset-cache-size: 512m
+    msg-cache-size: 128m
+    rrset-cache-size: 256m
     cache-max-ttl: 86400
-    cache-min-ttl: 300
+    cache-min-ttl: 60
+    prefetch: yes
+    prefetch-key: yes
     
-    # 安全
+    # 安全设置
     hide-identity: yes
     hide-version: yes
+    harden-glue: yes
+    harden-dnssec-stripped: yes
+    use-caps-for-id: yes
     
+    # 查询设置
+    outgoing-range: 8192
+    num-queries-per-thread: 4096
+    edns-buffer-size: 1232
+    max-udp-size: 1232
+
+# 转发到上游DNS
 forward-zone:
     name: "."
     forward-addr: 223.5.5.5
     forward-addr: 119.29.29.29
-    forward-addr: 8.8.8.8
 EOF
 
+# 创建 systemd 服务目录
 mkdir -p /etc/systemd/system/unbound.service.d/
+
+# 创建简单的 systemd 配置（避免复杂权限问题）
 cat >/etc/systemd/system/unbound.service.d/override.conf <<'EOF'
 [Service]
-LimitNOFILE=1048576
+# 增加文件描述符限制
+LimitNOFILE=65536
+# 自动重启
 Restart=always
 RestartSec=3
+# 内存限制
+MemoryLimit=512M
 EOF
 
+# 修复权限和目录
+mkdir -p /var/lib/unbound
+chown -R unbound:unbound /var/lib/unbound 2>/dev/null || true
+
+# 重新加载 systemd 并启动服务
 systemctl daemon-reload
 systemctl enable unbound
 systemctl restart unbound
 
+# 等待 unbound 启动
+sleep 3
+
 echo "[INFO] unbound DNS 缓存已优化启动"
 
 # ===============================
-# 3. 系统 DNS 配置
+# 3. 配置系统 DNS
 # ===============================
-systemctl disable --now systemd-resolved 2>/dev/null || true
-systemctl stop systemd-resolved 2>/dev/null || true
+echo "[INFO] 配置系统 DNS 设置..."
 
+# 创建 resolv.conf 备份
+cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
+
+# 确保 resolv.conf 可写
+chattr -i /etc/resolv.conf 2>/dev/null || true
+
+# 配置 DNS
 cat >/etc/resolv.conf <<'EOF'
+# ix 网络优化配置
 nameserver 127.0.0.1
 nameserver 223.5.5.5
-options timeout:1 attempts:2 rotate
+nameserver 119.29.29.29
+options timeout:2 attempts:3 rotate
 EOF
 
+# 锁定文件防止被修改
 chattr +i /etc/resolv.conf 2>/dev/null || true
 
+echo "[INFO] 系统 DNS 配置完成"
+
 # ===============================
-# 4. 创建智能连接跟踪监控
+# 4. 测试 DNS 功能
 # ===============================
+echo "[INFO] 测试 DNS 功能..."
+
+# 等待 unbound 完全启动
+sleep 2
+
+# 测试本地 DNS
+echo "测试 127.0.0.1 解析："
+if dig @127.0.0.1 baidu.com +short +time=2 +tries=2 2>/dev/null | grep -q "."; then
+    echo "✓ 本地 DNS 解析成功"
+else
+    echo "✗ 本地 DNS 解析失败，尝试重启 unbound..."
+    systemctl restart unbound
+    sleep 2
+    
+    # 再次测试
+    if dig @127.0.0.1 baidu.com +short +time=2 +tries=2 2>/dev/null | grep -q "."; then
+        echo "✓ 重启后本地 DNS 解析成功"
+    else
+        echo "⚠ 本地 DNS 仍然失败，将使用公共 DNS 作为备选"
+        # 修改 resolv.conf 把公共 DNS 放前面
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        cat >/etc/resolv.conf <<'EOF'
+# ix 网络优化配置（本地DNS故障备用）
+nameserver 223.5.5.5
+nameserver 119.29.29.29
+nameserver 127.0.0.1
+options timeout:1 attempts:2 rotate
+EOF
+        chattr +i /etc/resolv.conf 2>/dev/null || true
+    fi
+fi
+
+# 测试公共 DNS
+echo "测试公共 DNS 解析："
+if dig @223.5.5.5 google.com +short +time=2 +tries=2 2>/dev/null | grep -q "."; then
+    echo "✓ 公共 DNS 解析成功"
+else
+    echo "✗ 公共 DNS 解析失败，检查网络连接"
+fi
+
+# ===============================
+# 5. 创建智能连接跟踪监控
+# ===============================
+echo "[INFO] 配置连接跟踪监控..."
+
 cat >/usr/local/bin/monitor-conntrack.sh <<'EOF'
 #!/bin/bash
-# 智能监控连接跟踪表，避免粗暴清理导致网络中断
+# 智能监控连接跟踪表
 
 LOG_FILE="/var/log/conntrack-monitor.log"
 MAX_CONNTRACK=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 6000000)
-WARNING_THRESHOLD=$((MAX_CONNTRACK * 80 / 100))  # 80% 警告
-CRITICAL_THRESHOLD=$((MAX_CONNTRACK * 90 / 100)) # 90% 严重警告
 CURRENT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
 
 # 获取当前时间
 HOUR=$(date +%H)
-WEEKDAY=$(date +%u)  # 1=周一, 7=周日
 
-# 判断是否高峰期（深圳时间 8:00-23:00 为高峰期）
+# 判断是否高峰期
 PEAK_HOUR=0
 if [ $HOUR -ge 8 ] && [ $HOUR -lt 23 ]; then
     PEAK_HOUR=1
 fi
 
 # 记录状态
-log_message() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
-}
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 连接数: $CURRENT/$MAX_CONNTRACK, 高峰期: $PEAK_HOUR" >> "$LOG_FILE"
 
-# 检查当前状态
-check_status() {
-    echo "=== 连接跟踪状态监控 ==="
-    echo "当前连接数: $CURRENT"
-    echo "最大限制: $MAX_CONNTRACK"
-    echo "使用率: $((CURRENT * 100 / MAX_CONNTRACK))%"
-    echo "是否高峰期: $([ $PEAK_HOUR -eq 1 ] && echo "是" || echo "否")"
-    echo "星期: $WEEKDAY"
-    
-    # 检查是否有异常增长
-    if [ $CURRENT -gt $CRITICAL_THRESHOLD ]; then
-        echo "状态: 🔴 严重 - 连接数超过90%！"
-        return 3
-    elif [ $CURRENT -gt $WARNING_THRESHOLD ]; then
-        echo "状态: 🟡 警告 - 连接数超过80%"
-        return 2
-    else
-        echo "状态: 🟢 正常"
-        return 0
-    fi
-}
-
-# 智能清理策略
-smart_cleanup() {
-    local reason=$1
-    
-    log_message "触发智能清理: $reason"
-    log_message "清理前: $CURRENT/$MAX_CONNTRACK"
-    
-    # 策略1: 如果是高峰期，只清理超时连接
-    if [ $PEAK_HOUR -eq 1 ]; then
-        log_message "高峰期 - 仅清理超时连接"
-        # 清理超过12小时的TCP连接
-        conntrack -D --proto tcp --state ESTABLISHED --timeout 43200 2>/dev/null || true
-        # 清理超过5分钟的UDP连接
-        conntrack -D --proto udp --timeout 300 2>/dev/null || true
-        log_message "高峰期轻度清理完成"
-    else
-        # 非高峰期，可以更积极地清理
-        log_message "非高峰期 - 执行深度清理"
-        # 清理TIME_WAIT状态的TCP连接
-        conntrack -D --proto tcp --state TIME_WAIT 2>/dev/null || true
-        # 清理CLOSE_WAIT状态的TCP连接
-        conntrack -D --proto tcp --state CLOSE_WAIT 2>/dev/null || true
-        # 清理所有超时连接
-        conntrack -D -s 0.0.0.0/0 -d 0.0.0.0/0 --timeout 600 2>/dev/null || true
-        log_message "非高峰期深度清理完成"
-    fi
-    
-    # 更新当前连接数
-    CURRENT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
-    log_message "清理后: $CURRENT/$MAX_CONNTRACK"
-    
-    # 如果仍然很高，尝试其他方法
-    if [ $CURRENT -gt $CRITICAL_THRESHOLD ]; then
-        log_message "警告: 清理后连接数仍然过高"
-        # 尝试增加conntrack表大小
-        if [ $MAX_CONNTRACK -lt 8000000 ]; then
-            log_message "尝试增加conntrack_max到8000000"
-            echo 8000000 > /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || true
-        fi
-    fi
-}
-
-# 主逻辑
-main() {
-    check_status
-    status=$?
-    
-    case $status in
-        3)  # 严重状态
-            if [ $PEAK_HOUR -eq 1 ]; then
-                log_message "高峰期遇到严重状态，执行紧急但保守的清理"
-                smart_cleanup "高峰期紧急清理"
-            else
-                log_message "非高峰期严重状态，执行深度清理"
-                smart_cleanup "非高峰期深度清理"
-            fi
-            ;;
-        2)  # 警告状态
-            if [ $PEAK_HOUR -eq 0 ]; then
-                # 非高峰期达到警告级别，提前清理
-                log_message "非高峰期达到警告级别，预防性清理"
-                smart_cleanup "非高峰期预防性清理"
-            else
-                log_message "高峰期警告状态，记录但不清理"
-            fi
-            ;;
-        *)  # 正常状态
-            # 记录日志但不清理
-            log_message "状态正常: $CURRENT/$MAX_CONNTRACK"
-            ;;
-    esac
-    
-    # 每周日凌晨4点执行深度清理（流量最低时）
-    if [ $WEEKDAY -eq 7 ] && [ $HOUR -eq 4 ]; then
-        log_message "执行每周深度清理维护"
-        # 清理所有超时连接
-        conntrack -D --timeout 3600 2>/dev/null || true
-        # 重启unbound释放内存
-        systemctl restart unbound
-        log_message "每周维护完成"
-    fi
-}
-
-# 执行主函数并输出到日志和终端
-main 2>&1 | tee -a "$LOG_FILE"
+# 如果连接数超过500万，在非高峰期清理
+if [ $CURRENT -gt 5000000 ] && [ $PEAK_HOUR -eq 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 执行非高峰期清理" >> "$LOG_FILE"
+    # 只清理超时连接
+    conntrack -D --timeout 600 2>/dev/null || true
+fi
 EOF
 
 chmod +x /usr/local/bin/monitor-conntrack.sh
 
 # ===============================
-# 5. 创建只读监控脚本（不清理）
+# 6. 创建只读监控脚本
 # ===============================
-cat >/usr/local/bin/check-conntrack.sh <<'EOF'
+cat >/usr/local/bin/check-network.sh <<'EOF'
 #!/bin/bash
-# 只读监控，不执行任何清理操作
+# 网络状态检查脚本
 
-echo "=== 连接跟踪表状态监控（只读）==="
-echo "监控时间: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "=== ix 网络优化状态检查 ==="
+echo "检查时间: $(date '+%Y-%m-%d %H:%M:%S')"
+echo ""
 
-# 获取conntrack信息
-MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo "未启用")
-CURRENT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "N/A")
-
-if [ "$CURRENT" != "N/A" ] && [ "$MAX" != "未启用" ]; then
-    PERCENT=$((CURRENT * 100 / MAX))
-    
-    echo "当前连接数: $CURRENT"
-    echo "最大连接数: $MAX"
-    echo "使用率: $PERCENT%"
-    
-    # 彩色显示状态
-    if [ $PERCENT -gt 90 ]; then
-        echo -e "状态: \033[31m🔴 危险 ($PERCENT%)\033[0m"
-        echo "建议: 立即检查是否有异常连接或DDoS攻击"
-    elif [ $PERCENT -gt 70 ]; then
-        echo -e "状态: \033[33m🟡 警告 ($PERCENT%)\033[0m"
-        echo "建议: 考虑在非高峰期清理"
-    else
-        echo -e "状态: \033[32m🟢 正常 ($PERCENT%)\033[0m"
-    fi
-    
-    # 显示连接类型分布
-    echo ""
-    echo "连接类型分布:"
-    if command -v conntrack &>/dev/null; then
-        conntrack -L 2>/dev/null | awk '{print $1}' | sort | uniq -c | sort -rn | head -10 | \
-        while read count type; do
-            echo "  $type: $count"
-        done
-    fi
+# 1. 检查 unbound 状态
+echo "1. DNS 服务状态:"
+if systemctl is-active --quiet unbound; then
+    echo "   ✓ unbound 运行正常"
+    echo "   监听端口:"
+    ss -tuln | grep :53 || echo "   未找到53端口监听"
 else
-    echo "连接跟踪表未启用或不可用"
+    echo "   ✗ unbound 未运行"
 fi
 
+# 2. 检查 DNS 解析
 echo ""
-echo "系统负载: $(uptime | awk -F'load average:' '{print $2}')"
-echo "内存使用: $(free -h | awk 'NR==2{print $3"/"$2}')"
+echo "2. DNS 解析测试:"
+echo "   本地解析:"
+if dig @127.0.0.1 baidu.com +short +time=1 2>/dev/null | head -1; then
+    echo "   ✓ 本地 DNS 正常"
+else
+    echo "   ✗ 本地 DNS 失败"
+fi
+
+echo "   公共解析:"
+if dig @223.5.5.5 baidu.com +short +time=1 2>/dev/null | head -1; then
+    echo "   ✓ 公共 DNS 正常"
+else
+    echo "   ✗ 公共 DNS 失败"
+fi
+
+# 3. 检查连接跟踪
 echo ""
-echo "最近5条监控日志:"
-tail -5 /var/log/conntrack-monitor.log 2>/dev/null || echo "无日志"
+echo "3. 连接跟踪状态:"
+CONN_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "N/A")
+CONN_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo "N/A")
+if [ "$CONN_COUNT" != "N/A" ] && [ "$CONN_MAX" != "N/A" ]; then
+    PERCENT=$((CONN_COUNT * 100 / CONN_MAX))
+    echo "   当前连接: $CONN_COUNT"
+    echo "   最大限制: $CONN_MAX"
+    echo "   使用率: $PERCENT%"
+    
+    if [ $PERCENT -gt 80 ]; then
+        echo "   ⚠ 连接数较高，建议监控"
+    fi
+else
+    echo "   连接跟踪未启用"
+fi
+
+# 4. 系统负载
+echo ""
+echo "4. 系统状态:"
+echo "   负载: $(uptime | awk -F'load average:' '{print $2}')"
+echo "   内存: $(free -h | awk 'NR==2{print $3"/"$2}')"
+echo "   磁盘: $(df -h / | awk 'NR==2{print $4" 可用"}')"
 EOF
 
-chmod +x /usr/local/bin/check-conntrack.sh
+chmod +x /usr/local/bin/check-network.sh
 
 # ===============================
-# 6. 设置定时任务
+# 7. 设置定时任务
 # ===============================
-# 创建监控目录
-mkdir -p /var/log
+# 每30分钟检查一次连接数
+(crontab -l 2>/dev/null | grep -v "monitor-conntrack"; echo "*/30 * * * * /usr/local/bin/monitor-conntrack.sh >/dev/null 2>&1") | crontab -
 
-# 每10分钟监控一次（但不一定清理）
-(crontab -l 2>/dev/null | grep -v "monitor-conntrack"; echo "*/10 * * * * /usr/local/bin/monitor-conntrack.sh >/dev/null 2>&1") | crontab -
+# 每天凌晨3点清理日志
+(crontab -l 2>/dev/null | grep -v "clean-logs"; echo "0 3 * * * find /var/log -name 'conntrack-*.log' -mtime +7 -delete 2>/dev/null") | crontab -
 
-# 每小时记录一次状态到日志
-(crontab -l 2>/dev/null | grep -v "check-conntrack"; echo "0 * * * * /usr/local/bin/check-conntrack.sh >> /var/log/conntrack-hourly.log 2>&1") | crontab -
-
+# ===============================
+# 8. 最终验证和提示
+# ===============================
+echo ""
 echo "--------------------------------------"
-echo "[SUCCESS] ix 深圳汇聚节点智能优化完成"
+echo "[SUCCESS] ix 深圳汇聚节点网络优化完成"
+echo "--------------------------------------"
 echo ""
-echo "核心改进："
-echo "1. 大幅增加 conntrack_max 到 600万（减少清理需求）"
-echo "2. 智能分时段清理策略："
-echo "   - 高峰期（8:00-23:00）：只清理超时连接"
-echo "   - 非高峰期：执行深度清理"
-echo "   - 每周日4:00：执行维护清理"
-echo "3. 移除了已废弃的 tcp_tw_recycle 参数"
-echo "4. 添加只读监控脚本，不自动清理"
+echo "✅ 已配置完成:"
+echo "   1. 内核参数优化 (conntrack_max=600万)"
+echo "   2. Unbound 本地 DNS 缓存"
+echo "   3. 智能连接监控"
+echo "   4. 系统 DNS 配置"
 echo ""
-echo "监控命令："
-echo "  /usr/local/bin/check-conntrack.sh  # 只读查看状态"
-echo "  tail -f /var/log/conntrack-monitor.log  # 查看监控日志"
+echo "🔍 检查命令:"
+echo "   /usr/local/bin/check-network.sh"
+echo "   systemctl status unbound"
+echo "   dig @127.0.0.1 baidu.com +short"
 echo ""
-echo "手动清理命令（谨慎使用）："
-echo "  # 只清理超时连接（安全）"
-echo "  conntrack -D --timeout 600"
-echo "  # 清理特定状态的连接"
-echo "  conntrack -D --state TIME_WAIT"
+echo "📊 查看连接数:"
+echo "   cat /proc/sys/net/netfilter/nf_conntrack_count"
 echo ""
-echo "紧急处理："
-echo "  如果网络卡顿，先检查连接数："
-echo "    cat /proc/sys/net/netfilter/nf_conntrack_count"
-echo "  如果超过500万，在业务低峰期手动清理"
+echo "🔄 重启服务:"
+echo "   systemctl restart unbound  # 重启DNS"
+echo ""
+echo "⚠ 如果仍有图片加载问题，请检查:"
+echo "   1. 服务器带宽是否充足"
+echo "   2. 使用命令: ping -c 5 baidu.com"
+echo "   3. 使用命令: curl -I https://www.baidu.com"
+echo ""
+echo "📝 日志文件:"
+echo "   /var/log/conntrack-monitor.log"
 echo "--------------------------------------"
 
-# 初始运行一次监控
-/usr/local/bin/monitor-conntrack.sh >/dev/null 2>&1
-
-# ===============================
-# 7. 验证配置
-# ===============================
-echo "[INFO] 验证当前配置..."
-echo "1. Unbound 状态: $(systemctl is-active unbound)"
-echo "2. 连接跟踪表大小: $(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo '未启用')"
-echo "3. 当前连接数: $(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 'N/A')"
-echo "4. DNS 解析测试: $(dig @127.0.0.1 baidu.com +short 2>/dev/null | head -1 || echo '失败')"
-echo "[INFO] 优化完成！建议重启服务器使所有配置生效。"
+# 运行一次检查
+echo ""
+echo "[INFO] 运行最终检查..."
+/usr/local/bin/check-network.sh
