@@ -2,12 +2,34 @@
 set -euo pipefail
 
 CONFIG_DIR="/etc/gost"
+LOG_FILE="/tmp/gost_ip_manager.log"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# ================= 依赖检查 =================
+install_pkg() {
+    local pkg=$1
+    if ! command -v "$pkg" &> /dev/null; then
+        echo -e "${YELLOW}检测到缺少 $pkg，尝试安装...${NC}"
+        if [ -f /etc/debian_version ]; then
+            sudo apt update && sudo apt install -y "$pkg"
+        elif [ -f /etc/redhat-release ]; then
+            sudo yum install -y "$pkg"
+        elif command -v apk &> /dev/null; then
+            sudo apk add "$pkg"
+        else
+            echo -e "${RED}请手动安装 $pkg${NC}" && exit 1
+        fi
+    fi
+}
+
+install_pkg jq
+install_pkg curl
+
+# ================= 国旗函数 =================
 flag() {
     case "$1" in
         HK) echo "🇭🇰" ;;
@@ -20,15 +42,17 @@ flag() {
     esac
 }
 
+# ================= IP 信息查询 =================
 ip_info() {
-    curl -s --max-time 3 "http://ip-api.com/json/$1?fields=status,country,countryCode" |
+    local ip=$1
+    curl -s --max-time 3 "http://ip-api.com/json/$ip?fields=status,country,countryCode" |
     jq -r 'if .status=="success"
            then "\(.countryCode)|\(.country)"
            else "UNK|Unknown"
            end'
 }
 
-# ===== 选择配置文件（只选一次）=====
+# ================= 选择配置文件 =================
 configs=("$CONFIG_DIR"/*.json)
 [ ${#configs[@]} -eq 0 ] && echo -e "${RED}未找到 GOST 配置文件${NC}" && exit 1
 
@@ -37,7 +61,7 @@ select CONFIG in "${configs[@]}"; do
     [ -n "$CONFIG" ] && break
 done
 
-# ===== 主循环 =====
+# ================= 主循环 =================
 while true; do
 
 RAW="/tmp/gost_raw.$$"
@@ -87,6 +111,7 @@ read -p "请输入新 IP: " new_ip
 backup="$CONFIG.bak.$(date +%Y%m%d_%H%M%S)"
 cp "$CONFIG" "$backup"
 
+# ================= 执行替换 =================
 if [[ "$replace_all" =~ ^[Yy]$ ]]; then
     grep -F "|$country|" "$SORTED" | while IFS='|' read -r _ _ _ svc node ip port; do
         jq --arg s "$svc" --arg n "$node" --arg a "$new_ip:$port" \
@@ -107,10 +132,15 @@ echo -e "${YELLOW}已备份:${NC} $backup"
 
 rm -f "$RAW" "$SORTED"
 
+# ================= 是否继续 =================
 echo ""
-read -p "是否还继续替换 IP? (y/N): " cont
-[[ "$cont" =~ ^[Yy]$ ]] || break
+echo "--------------------------------------"
+read -p "是否还继续替换 IP? (y/N): " cont || cont=""
+if [[ "$cont" =~ ^[Yy]$ ]]; then
+    continue
+else
+    echo -e "\n${GREEN}已退出 IP 替换工具${NC}"
+    break
+fi
 
 done
-
-echo -e "\n${GREEN}已退出 IP 替换工具${NC}"
