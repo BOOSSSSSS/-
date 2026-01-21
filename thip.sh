@@ -3,13 +3,11 @@ set -euo pipefail
 
 CONFIG_DIR="/etc/gost"
 
-# ===== 颜色 =====
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# ===== 区旗 =====
 flag() {
     case "$1" in
         HK) echo "🇭🇰" ;;
@@ -22,7 +20,6 @@ flag() {
     esac
 }
 
-# ===== IP 信息 =====
 ip_info() {
     curl -s --max-time 3 "http://ip-api.com/json/$1?fields=status,country,countryCode" |
     jq -r 'if .status=="success"
@@ -31,7 +28,7 @@ ip_info() {
            end'
 }
 
-# ===== 选择配置文件 =====
+# ===== 选择配置文件（只选一次）=====
 configs=("$CONFIG_DIR"/*.json)
 [ ${#configs[@]} -eq 0 ] && echo -e "${RED}未找到 GOST 配置文件${NC}" && exit 1
 
@@ -40,11 +37,13 @@ select CONFIG in "${configs[@]}"; do
     [ -n "$CONFIG" ] && break
 done
 
+# ===== 主循环 =====
+while true; do
+
 RAW="/tmp/gost_raw.$$"
 SORTED="/tmp/gost_sorted.$$"
 > "$RAW"
 
-# ===== 提取 IP =====
 jq -r '
 .services[] |
   .name as $svc |
@@ -59,10 +58,8 @@ jq -r '
     echo "$country|$(flag "$cc")|$svc|$node|$ip|$port" >> "$RAW"
 done
 
-# ===== 排序 + 编号（唯一数据源，核心修复点）=====
 nl -w2 -s'|' <(sort "$RAW") > "$SORTED"
 
-# ===== 显示列表 =====
 echo -e "\n${GREEN}IP 分组列表:${NC}"
 while IFS='|' read -r idx country flag svc node ip port; do
     printf "[%s] %-14s %s %-15s %-6s %s/%s\n" \
@@ -73,9 +70,8 @@ total=$(wc -l < "$SORTED")
 echo ""
 read -p "选择要替换的序号 (1-$total): " idx
 
-# ===== 严格从 SORTED 取值 =====
 line=$(awk -F'|' -v i="$idx" '$1==i {print}' "$SORTED")
-[ -z "$line" ] && echo -e "${RED}无效序号${NC}" && exit 1
+[ -z "$line" ] && echo -e "${RED}无效序号${NC}" && continue
 
 IFS='|' read -r _ country flag svc node old_ip port <<< "$line"
 
@@ -85,12 +81,12 @@ same_count=$(grep -F "|$country|" "$SORTED" | wc -l)
 read -p "是否替换该地区全部 $same_count 个 IP? (y/N): " replace_all
 
 read -p "请输入新 IP: " new_ip
-[[ ! "$new_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && echo -e "${RED}IP 格式错误${NC}" && exit 1
+[[ ! "$new_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && \
+    echo -e "${RED}IP 格式错误${NC}" && continue
 
 backup="$CONFIG.bak.$(date +%Y%m%d_%H%M%S)"
 cp "$CONFIG" "$backup"
 
-# ===== 执行替换 =====
 if [[ "$replace_all" =~ ^[Yy]$ ]]; then
     grep -F "|$country|" "$SORTED" | while IFS='|' read -r _ _ _ svc node ip port; do
         jq --arg s "$svc" --arg n "$node" --arg a "$new_ip:$port" \
@@ -107,6 +103,14 @@ else
     echo -e "${GREEN}IP 替换完成${NC}"
 fi
 
-echo -e "${YELLOW}配置已备份:${NC} $backup"
+echo -e "${YELLOW}已备份:${NC} $backup"
 
 rm -f "$RAW" "$SORTED"
+
+echo ""
+read -p "是否还继续替换 IP? (y/N): " cont
+[[ "$cont" =~ ^[Yy]$ ]] || break
+
+done
+
+echo -e "\n${GREEN}已退出 IP 替换工具${NC}"
