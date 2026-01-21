@@ -10,7 +10,18 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
 NC='\033[0m' # 无颜色
+
+# 国家代码到国旗Emoji映射
+declare -A COUNTRY_FLAGS=(
+    ["CN"]="🇨🇳" ["US"]="🇺🇸" ["JP"]="🇯🇵" ["GB"]="🇬🇧" ["FR"]="🇫🇷" ["DE"]="🇩🇪"
+    ["RU"]="🇷🇺" ["KR"]="🇰🇷" ["IN"]="🇮🇳" ["BR"]="🇧🇷" ["CA"]="🇨🇦" ["AU"]="🇦🇺"
+    ["IT"]="🇮🇹" ["ES"]="🇪🇸" ["NL"]="🇳🇱" ["SE"]="🇸🇪" ["CH"]="🇨🇭" ["TW"]="🇨🇳"  # 台湾地区显示中国国旗
+    ["HK"]="🇭🇰" ["MO"]="🇲🇴" ["SG"]="🇸🇬" ["MY"]="🇲🇾" ["TH"]="🇹🇭" ["VN"]="🇻🇳"
+    ["PH"]="🇵🇭" ["ID"]="🇮🇩" ["SA"]="🇸🇦" ["AE"]="🇦🇪" ["TR"]="🇹🇷" ["IL"]="🇮🇱"
+)
 
 # 检查jq
 if ! command -v jq &> /dev/null; then
@@ -31,6 +42,72 @@ if ! command -v curl &> /dev/null; then
     echo "  Alpine: sudo apk add curl"
     exit 1
 fi
+
+# 获取国家对应的国旗Emoji
+get_country_flag() {
+    local country_code="$1"
+    local country_name="$2"
+    
+    # 如果传入了国家代码，直接使用
+    if [ -n "$country_code" ] && [ "$country_code" != "null" ] && [ "$country_code" != "N/A" ]; then
+        # 特殊处理：台湾地区显示中国国旗
+        if [ "$country_code" = "TW" ] || [ "$country_code" = "TWN" ]; then
+            echo "🇨🇳"
+            return
+        fi
+        
+        # 检查映射表中是否存在
+        if [ -n "${COUNTRY_FLAGS[$country_code]}" ]; then
+            echo "${COUNTRY_FLAGS[$country_code]}"
+            return
+        fi
+        
+        # 尝试使用前两个字母
+        local short_code="${country_code:0:2}"
+        if [ -n "${COUNTRY_FLAGS[$short_code]}" ]; then
+            echo "${COUNTRY_FLAGS[$short_code]}"
+            return
+        fi
+    fi
+    
+    # 通过国家名称映射
+    if [ -n "$country_name" ] && [ "$country_name" != "null" ] && [ "$country_name" != "N/A" ]; then
+        case "$country_name" in
+            *China*|*中国*|*china*)
+                echo "🇨🇳"
+                ;;
+            *Taiwan*|*台湾*|*taiwan*)
+                echo "🇨🇳"  # 台湾地区显示中国国旗
+                ;;
+            *United States*|*美国*|*USA*|*US*)
+                echo "🇺🇸"
+                ;;
+            *Japan*|*日本*|*japan*)
+                echo "🇯🇵"
+                ;;
+            *Korea*|*韩国*|*korea*)
+                echo "🇰🇷"
+                ;;
+            *Germany*|*德国*|*germany*)
+                echo "🇩🇪"
+                ;;
+            *France*|*法国*|*france*)
+                echo "🇫🇷"
+                ;;
+            *United Kingdom*|*英国*|*UK*|*Britain*)
+                echo "🇬🇧"
+                ;;
+            *Russia*|*俄罗斯*|*russia*)
+                echo "🇷🇺"
+                ;;
+            *)
+                echo "🌐"  # 默认地球图标
+                ;;
+        esac
+    else
+        echo "🌐"  # 默认地球图标
+    fi
+}
 
 # 查找配置文件
 find_config_file() {
@@ -86,44 +163,63 @@ validate_json_file() {
     return 0
 }
 
-# 查询IP地理位置
+# 查询IP地理位置（增强版，返回国家代码）
 get_ip_location() {
     local ip="$1"
     
-    # 使用ip-api.com查询
+    # 使用ip-api.com查询（获取更多信息包括国家代码）
     local response
-    response=$(curl -s "http://ip-api.com/json/$ip?fields=status,country,regionName,city,isp" 2>/dev/null || echo "{}")
+    response=$(curl -s "http://ip-api.com/json/$ip?fields=status,country,countryCode,regionName,city,isp,query" 2>/dev/null || echo "{}")
     
     if echo "$response" | grep -q '"status":"success"'; then
-        local country city region isp
+        local country country_code region city isp
         country=$(echo "$response" | grep -o '"country":"[^"]*"' | cut -d'"' -f4)
+        country_code=$(echo "$response" | grep -o '"countryCode":"[^"]*"' | cut -d'"' -f4)
         region=$(echo "$response" | grep -o '"regionName":"[^"]*"' | cut -d'"' -f4)
         city=$(echo "$response" | grep -o '"city":"[^"]*"' | cut -d'"' -f4)
         isp=$(echo "$response" | grep -o '"isp":"[^"]*"' | cut -d'"' -f4)
         
-        echo "$country/$region/$city ($isp)"
+        # 返回国家代码和位置信息的复合字符串
+        echo "$country_code|$country/$region/$city ($isp)"
     else
-        echo "未知"
+        echo "unknown|未知"
     fi
 }
 
-# 提取IP信息
-extract_ip_info() {
-    local config_file="$1"
-    local temp_file="/tmp/gost_ips_$$.txt"
+# 获取IP的地理位置分组标识
+get_location_group() {
+    local location_info="$1"
+    local country_code=$(echo "$location_info" | cut -d'|' -f1)
+    local location_str=$(echo "$location_info" | cut -d'|' -f2)
     
-    # 清空临时文件
+    # 提取国家名称（去除ISP信息）
+    local country=$(echo "$location_str" | cut -d'/' -f1 | cut -d'(' -f1 | sed 's/ $//')
+    
+    # 如果国家是未知，则使用IP地址前两位作为分组
+    if [ "$country" = "未知" ] || [ -z "$country" ]; then
+        echo "未知地区"
+    else
+        echo "$country"
+    fi
+}
+
+# 显示所有IP，按地区分组
+display_all_ips_by_group() {
+    echo -e "\n${GREEN}正在提取配置文件中的所有IP地址...${NC}"
+    
+    # 临时文件存储IP信息
+    local temp_file="/tmp/gost_ips_$$.txt"
     > "$temp_file"
     
     # 检查JSON结构
-    if ! jq -e '.services' "$config_file" >/dev/null 2>&1; then
+    if ! jq -e '.services' "$CONFIG_FILE" >/dev/null 2>&1; then
         echo -e "${RED}错误: 配置文件中缺少services字段${NC}"
         return 1
     fi
     
     # 获取服务数量
     local service_count
-    service_count=$(jq '.services | length' "$config_file")
+    service_count=$(jq '.services | length' "$CONFIG_FILE")
     if [ "$service_count" -eq 0 ]; then
         echo -e "${RED}错误: 配置文件中没有找到服务${NC}"
         return 1
@@ -135,45 +231,45 @@ extract_ip_info() {
     for ((i=0; i<service_count; i++)); do
         # 获取服务名
         local service_name
-        service_name=$(jq -r ".services[$i].name // \"未命名服务-$i\"" "$config_file")
+        service_name=$(jq -r ".services[$i].name // \"未命名服务-$i\"" "$CONFIG_FILE")
         
         # 检查forwarder和nodes是否存在
-        if jq -e ".services[$i].forwarder.nodes" "$config_file" >/dev/null 2>&1; then
+        if jq -e ".services[$i].forwarder.nodes" "$CONFIG_FILE" >/dev/null 2>&1; then
             # 获取节点数量
             local node_count
-            node_count=$(jq ".services[$i].forwarder.nodes | length" "$config_file")
+            node_count=$(jq ".services[$i].forwarder.nodes | length" "$CONFIG_FILE")
             
             for ((j=0; j<node_count; j++)); do
                 # 获取节点信息
                 local node_name node_addr
-                node_name=$(jq -r ".services[$i].forwarder.nodes[$j].name // \"node_$((j+1))\"" "$config_file")
-                node_addr=$(jq -r ".services[$i].forwarder.nodes[$j].addr" "$config_file")
+                node_name=$(jq -r ".services[$i].forwarder.nodes[$j].name // \"node_$((j+1))\"" "$CONFIG_FILE")
+                node_addr=$(jq -r ".services[$i].forwarder.nodes[$j].addr" "$CONFIG_FILE")
                 
                 if [[ "$node_addr" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
                     local ip port
                     ip="${BASH_REMATCH[1]}"
                     port="${BASH_REMATCH[2]}"
                     
+                    # 查询地理位置
+                    local location_info
+                    location_info=$(get_ip_location "$ip")
+                    local country_code=$(echo "$location_info" | cut -d'|' -f1)
+                    local location_str=$(echo "$location_info" | cut -d'|' -f2)
+                    
+                    # 获取国旗
+                    local flag_emoji
+                    flag_emoji=$(get_country_flag "$country_code" "$location_str")
+                    
+                    # 获取地区分组
+                    local location_group
+                    location_group=$(get_location_group "$location_info")
+                    
                     # 保存到临时文件
-                    echo "$service_name|$node_name|$ip|$port" >> "$temp_file"
+                    echo "$location_group|$flag_emoji|$location_str|$service_name|$node_name|$ip|$port" >> "$temp_file"
                 fi
             done
         fi
     done
-    
-    echo "$temp_file"
-}
-
-# 显示所有IP和地理位置
-display_all_ips() {
-    echo -e "\n${GREEN}正在提取配置文件中的所有IP地址...${NC}"
-    
-    # 提取IP信息
-    local temp_file
-    temp_file=$(extract_ip_info "$CONFIG_FILE")
-    if [ $? -ne 0 ]; then
-        return 1
-    fi
     
     # 获取IP总数
     local total_ips
@@ -182,51 +278,88 @@ display_all_ips() {
     if [ "$total_ips" -eq 0 ]; then
         echo -e "${YELLOW}没有找到IP地址${NC}"
         rm -f "$temp_file"
-        return 0
+        return 1
     fi
     
-    echo -e "${GREEN}共发现 $total_ips 个IP地址${NC}\n"
+    echo -e "${GREEN}共发现 $total_ips 个IP地址，按地区分组如下:${NC}\n"
     
-    # 显示表头
-    printf "%-5s | %-20s | %-15s | %-8s | %-30s\n" "序号" "服务名称" "IP地址" "端口" "地理位置"
-    echo "------------------------------------------------------------------------------------------------"
+    # 按地区分组统计
+    echo -e "${CYAN}地区分组统计:${NC}"
+    echo "================================================================"
+    printf "%-30s | %-10s | %s\n" "地区" "IP数量" "IP地址"
+    echo "================================================================"
     
-    # 显示每个IP的信息
+    # 使用awk进行分组统计
+    awk -F'|' '{
+        group=$1
+        ip=$6
+        ip_count[group]++
+        if (!(ip in ip_seen[group])) {
+            ip_seen[group][ip] = 1
+            ip_list[group] = ip_list[group] (ip_list[group] == "" ? "" : ", ") ip
+        }
+    } 
+    END {
+        for (group in ip_count) {
+            printf "%-30s | %-10s | %s\n", group, ip_count[group], ip_list[group]
+        }
+    }' "$temp_file" | sort
+    
+    echo ""
+    
+    # 显示详细列表
+    echo -e "${CYAN}详细IP列表:${NC}"
+    echo "=================================================================================================================================="
+    printf "%-5s | %-30s | %-2s | %-15s | %-8s | %-20s | %-15s\n" \
+        "序号" "地区" "国旗" "IP地址" "端口" "服务名称" "节点名称"
+    echo "=================================================================================================================================="
+    
+    # 按地区分组显示
+    local current_group=""
+    local group_index=0
     local index=1
-    while IFS='|' read -r service_name node_name ip port; do
-        # 查询地理位置
-        local location
-        location=$(get_ip_location "$ip")
+    
+    # 先按地区排序
+    sort -t'|' -k1,1 "$temp_file" | while IFS='|' read -r location_group flag_emoji location_str service_name node_name ip port; do
+        # 如果是新的地区组，显示组标题
+        if [ "$location_group" != "$current_group" ]; then
+            current_group="$location_group"
+            group_index=$((group_index + 1))
+            echo ""
+            echo -e "${PURPLE}第 $group_index 组: $location_group ${NC}"
+        fi
         
-        # 显示信息
-        printf "%-5s | %-20s | %-15s | %-8s | %-30s\n" \
+        # 显示IP信息
+        printf "%-5s | %-30s | %-2s | %-15s | %-8s | %-20s | %-15s\n" \
             "[$index]" \
-            "${service_name:0:18}..." \
+            "$location_group" \
+            "$flag_emoji" \
             "$ip" \
             "$port" \
-            "$location"
+            "${service_name:0:18}" \
+            "${node_name:0:13}"
         
         index=$((index + 1))
-    done < "$temp_file"
+    done
     
     echo ""
     echo "$temp_file"
 }
 
-# 选择IP进行替换
+# 选择IP进行替换（支持按地区组替换）
 select_ip_to_replace() {
     echo -e "\n${YELLOW}=== 选择要替换的IP地址 ===${NC}"
     
-    # 显示所有IP
+    # 显示所有IP（按地区分组）
     local temp_file
-    temp_file=$(display_all_ips)
+    temp_file=$(display_all_ips_by_group)
     
     if [ -z "$temp_file" ] || [ ! -s "$temp_file" ]; then
         echo -e "${RED}没有找到可替换的IP地址${NC}"
         return 1
     fi
     
-    # 获取IP总数
+    # 获取总IP数
     local total_ips
     total_ips=$(wc -l < "$temp_file" 2>/dev/null)
     
@@ -254,20 +387,81 @@ select_ip_to_replace() {
     
     # 获取选中的IP信息
     local selected_line
-    selected_line=$(sed -n "${choice}p" "$temp_file")
+    selected_line=$(sort -t'|' -k1,1 "$temp_file" | sed -n "${choice}p")
     
-    local service_name node_name old_ip port
-    IFS='|' read -r service_name node_name old_ip port <<< "$selected_line"
+    local location_group flag_emoji location_str service_name node_name old_ip port
+    IFS='|' read -r location_group flag_emoji location_str service_name node_name old_ip port <<< "$selected_line"
     
+    # 显示选中的IP信息
     echo -e "\n${GREEN}已选择:${NC}"
+    echo -e "  序号: $choice"
+    echo -e "  地区: $location_group $flag_emoji"
+    echo -e "  位置: $location_str"
     echo -e "  服务: $service_name"
     echo -e "  节点: $node_name"
     echo -e "  IP地址: $old_ip:$port"
     
-    # 显示当前地理位置
-    local current_location
-    current_location=$(get_ip_location "$old_ip")
-    echo -e "  当前位置: $current_location"
+    # 查找同一地区的其他IP
+    echo -e "\n${YELLOW}=== 同一地区($location_group)的其他IP地址 ===${NC}"
+    
+    # 提取同一地区的所有IP
+    local same_region_file="/tmp/gost_same_region_$$.txt"
+    grep "^$location_group|" "$temp_file" > "$same_region_file"
+    
+    local region_ip_count=$(wc -l < "$same_region_file" 2>/dev/null)
+    
+    if [ "$region_ip_count" -gt 1 ]; then
+        echo -e "${YELLOW}发现 $region_ip_count 个相同地区的IP地址:${NC}"
+        echo "========================================================================================="
+        printf "%-5s | %-2s | %-15s | %-8s | %-20s | %-15s\n" \
+            "序号" "国旗" "IP地址" "端口" "服务名称" "节点名称"
+        echo "========================================================================================="
+        
+        local region_index=1
+        while IFS='|' read -r group flag loc_str svc_name nd_name ip_addr ip_port; do
+            printf "%-5s | %-2s | %-15s | %-8s | %-20s | %-15s\n" \
+                "$region_index" \
+                "$flag" \
+                "$ip_addr" \
+                "$ip_port" \
+                "${svc_name:0:18}" \
+                "${nd_name:0:13}"
+            region_index=$((region_index + 1))
+        done < "$same_region_file"
+        
+        echo ""
+        
+        # 询问是否替换同一地区的所有IP
+        read -p "是否替换同一地区($location_group)的所有 $region_ip_count 个IP地址? (y/N): " replace_all
+        
+        if [[ "$replace_all" =~ ^[Yy]$ ]]; then
+            echo -e "\n${YELLOW}您选择了替换同一地区的所有IP地址${NC}"
+            replace_same_region_ips "$same_region_file" "$location_group"
+            rm -f "$same_region_file" "$temp_file"
+            return 0
+        else
+            echo -e "${YELLOW}将只替换选中的单个IP地址${NC}"
+        fi
+    else
+        echo -e "${YELLOW}该地区只有1个IP地址${NC}"
+    fi
+    
+    # 只替换单个IP
+    replace_single_ip "$service_name" "$node_name" "$old_ip" "$port" "$flag_emoji" "$location_str"
+    
+    # 清理临时文件
+    rm -f "$same_region_file" "$temp_file"
+    return 0
+}
+
+# 替换单个IP
+replace_single_ip() {
+    local service_name="$1"
+    local node_name="$2"
+    local old_ip="$3"
+    local port="$4"
+    local flag_emoji="$5"
+    local location_str="$6"
     
     # 输入新IP
     echo ""
@@ -276,15 +470,19 @@ select_ip_to_replace() {
     # 验证IP格式
     if ! [[ "$new_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo -e "${RED}错误: IP地址格式不正确${NC}"
-        rm -f "$temp_file"
         return 1
     fi
     
     # 显示新IP的地理位置
     echo -e "\n${YELLOW}查询新IP的地理位置...${NC}"
-    local new_location
-    new_location=$(get_ip_location "$new_ip")
-    echo -e "  新位置: $new_location"
+    local new_location_info
+    new_location_info=$(get_ip_location "$new_ip")
+    local new_country_code new_location_str new_flag_emoji
+    new_country_code=$(echo "$new_location_info" | cut -d'|' -f1)
+    new_location_str=$(echo "$new_location_info" | cut -d'|' -f2)
+    new_flag_emoji=$(get_country_flag "$new_country_code" "$new_location_str")
+    
+    echo -e "  新位置: $new_flag_emoji $new_location_str"
     
     # 确认替换
     echo ""
@@ -292,7 +490,6 @@ select_ip_to_replace() {
     
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
         echo -e "${YELLOW}操作已取消${NC}"
-        rm -f "$temp_file"
         return 0
     fi
     
@@ -306,6 +503,7 @@ select_ip_to_replace() {
     
     # 构建新的地址
     local new_addr="${new_ip}:${port}"
+    local old_addr="${old_ip}:${port}"
     
     # 使用jq替换特定服务的特定节点的IP
     if jq -e --arg service "$service_name" --arg node "$node_name" --arg new_addr "$new_addr" \
@@ -315,15 +513,15 @@ select_ip_to_replace() {
         echo -e "${GREEN}✓ IP地址替换成功!${NC}"
         
         # 记录日志
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - 替换IP: $service_name/$node_name: $old_ip -> $new_ip (位置: $new_location)" >> "$LOG_FILE"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - 替换IP: $service_name/$node_name: $old_ip($flag_emoji) -> $new_ip($new_flag_emoji)" >> "$LOG_FILE"
         
         # 验证修改
         echo -e "\n${YELLOW}验证修改结果:${NC}"
         local updated_addr
         updated_addr=$(jq -r --arg service "$service_name" \
-            '.services[] | select(.name==$service) | .forwarder.nodes[].addr' "$CONFIG_FILE" 2>/dev/null)
+            '.services[] | select(.name==$service) | .forwarder.nodes[].addr' "$CONFIG_FILE" 2>/dev/null | grep "^$new_ip:")
         
-        if [ "$updated_addr" = "$new_addr" ]; then
+        if [ -n "$updated_addr" ]; then
             echo -e "${GREEN}✓ 验证通过: $updated_addr${NC}"
         else
             echo -e "${RED}✗ 验证失败，正在恢复备份...${NC}"
@@ -333,21 +531,203 @@ select_ip_to_replace() {
         echo -e "${RED}✗ 替换失败，使用sed尝试...${NC}"
         
         # 如果jq失败，使用sed替换
-        if sed -i "s/\"addr\": \"$old_ip:$port\"/\"addr\": \"$new_ip:$port\"/g" "$CONFIG_FILE"; then
+        if sed -i "s/\"addr\": \"$old_addr\"/\"addr\": \"$new_addr\"/g" "$CONFIG_FILE"; then
             echo -e "${GREEN}✓ 使用sed替换成功!${NC}"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - 替换IP: $service_name/$node_name: $old_ip -> $new_ip (位置: $new_location)" >> "$LOG_FILE"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - 替换IP: $service_name/$node_name: $old_ip($flag_emoji) -> $new_ip($new_flag_emoji)" >> "$LOG_FILE"
         else
             echo -e "${RED}✗ 所有替换方法都失败了，正在恢复备份...${NC}"
             cp "$backup_file" "$CONFIG_FILE"
         fi
     fi
     
-    # 清理临时文件
-    rm -f "$temp_file"
+    echo ""
+    read -p "按Enter键继续..."
+    return 0
+}
+
+# 替换同一地区的所有IP
+replace_same_region_ips() {
+    local region_file="$1"
+    local location_group="$2"
+    
+    # 输入新IP
+    echo ""
+    read -p "请输入新的IP地址（将替换该地区所有IP）: " new_ip
+    
+    # 验证IP格式
+    if ! [[ "$new_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}错误: IP地址格式不正确${NC}"
+        return 1
+    fi
+    
+    # 显示新IP的地理位置
+    echo -e "\n${YELLOW}查询新IP的地理位置...${NC}"
+    local new_location_info
+    new_location_info=$(get_ip_location "$new_ip")
+    local new_country_code new_location_str new_flag_emoji
+    new_country_code=$(echo "$new_location_info" | cut -d'|' -f1)
+    new_location_str=$(echo "$new_location_info" | cut -d'|' -f2)
+    new_flag_emoji=$(get_country_flag "$new_country_code" "$new_location_str")
+    
+    echo -e "  新位置: $new_flag_emoji $new_location_str"
+    
+    # 再次确认
+    local ip_count=$(wc -l < "$region_file" 2>/dev/null)
+    echo -e "\n${RED}警告: 这将替换 $location_group 地区的 $ip_count 个IP地址!${NC}"
+    read -p "确定要替换吗? (输入 'yes' 确认): " confirm
+    
+    if [ "$confirm" != "yes" ]; then
+        echo -e "${YELLOW}操作已取消${NC}"
+        return 0
+    fi
+    
+    # 创建备份
+    local backup_file="${CONFIG_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$CONFIG_FILE" "$backup_file"
+    echo -e "${GREEN}已创建备份: $backup_file${NC}"
+    
+    # 替换所有IP
+    echo -e "\n${YELLOW}正在替换IP地址...${NC}"
+    
+    local success_count=0
+    local fail_count=0
+    
+    while IFS='|' read -r group flag loc_str service_name node_name old_ip port; do
+        echo -e "\n${BLUE}处理: $service_name/$node_name - $old_ip:$port${NC}"
+        
+        # 构建新旧地址
+        local old_addr="${old_ip}:${port}"
+        local new_addr="${new_ip}:${port}"
+        
+        # 使用jq替换
+        if jq -e --arg service "$service_name" --arg node "$node_name" --arg new_addr "$new_addr" \
+            '(.services[] | select(.name==$service) | .forwarder.nodes[] | select(.name==$node) | .addr) = $new_addr' \
+            "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" 2>/dev/null; then
+            mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+            echo -e "  ${GREEN}✓ 替换成功${NC}"
+            success_count=$((success_count + 1))
+        else
+            # 如果jq失败，尝试sed
+            if sed -i "s/\"addr\": \"$old_addr\"/\"addr\": \"$new_addr\"/g" "$CONFIG_FILE"; then
+                echo -e "  ${GREEN}✓ 使用sed替换成功${NC}"
+                success_count=$((success_count + 1))
+            else
+                echo -e "  ${RED}✗ 替换失败${NC}"
+                fail_count=$((fail_count + 1))
+            fi
+        fi
+    done < "$region_file"
+    
+    # 记录日志
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - 批量替换地区: $location_group ($ip_count 个IP) -> $new_ip($new_flag_emoji)" >> "$LOG_FILE"
+    
+    echo -e "\n${GREEN}替换完成!${NC}"
+    echo -e "  成功: $success_count 个"
+    echo -e "  失败: $fail_count 个"
+    echo -e "  备份文件: $backup_file"
     
     echo ""
     read -p "按Enter键继续..."
     return 0
+}
+
+# 显示所有IP（简单列表）
+display_all_ips_simple() {
+    echo -e "\n${GREEN}正在提取配置文件中的所有IP地址...${NC}"
+    
+    # 临时文件存储IP信息
+    local temp_file="/tmp/gost_ips_simple_$$.txt"
+    > "$temp_file"
+    
+    # 检查JSON结构
+    if ! jq -e '.services' "$CONFIG_FILE" >/dev/null 2>&1; then
+        echo -e "${RED}错误: 配置文件中缺少services字段${NC}"
+        return 1
+    fi
+    
+    # 获取服务数量
+    local service_count
+    service_count=$(jq '.services | length' "$CONFIG_FILE")
+    if [ "$service_count" -eq 0 ]; then
+        echo -e "${RED}错误: 配置文件中没有找到服务${NC}"
+        return 1
+    fi
+    
+    # 遍历所有服务
+    for ((i=0; i<service_count; i++)); do
+        # 获取服务名
+        local service_name
+        service_name=$(jq -r ".services[$i].name // \"未命名服务-$i\"" "$CONFIG_FILE")
+        
+        # 检查forwarder和nodes是否存在
+        if jq -e ".services[$i].forwarder.nodes" "$CONFIG_FILE" >/dev/null 2>&1; then
+            # 获取节点数量
+            local node_count
+            node_count=$(jq ".services[$i].forwarder.nodes | length" "$CONFIG_FILE")
+            
+            for ((j=0; j<node_count; j++)); do
+                # 获取节点信息
+                local node_name node_addr
+                node_name=$(jq -r ".services[$i].forwarder.nodes[$j].name // \"node_$((j+1))\"" "$CONFIG_FILE")
+                node_addr=$(jq -r ".services[$i].forwarder.nodes[$j].addr" "$CONFIG_FILE")
+                
+                if [[ "$node_addr" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
+                    local ip port
+                    ip="${BASH_REMATCH[1]}"
+                    port="${BASH_REMATCH[2]}"
+                    
+                    # 查询地理位置
+                    local location_info
+                    location_info=$(get_ip_location "$ip")
+                    local country_code=$(echo "$location_info" | cut -d'|' -f1)
+                    local location_str=$(echo "$location_info" | cut -d'|' -f2)
+                    
+                    # 获取国旗
+                    local flag_emoji
+                    flag_emoji=$(get_country_flag "$country_code" "$location_str")
+                    
+                    # 保存到临时文件
+                    echo "$flag_emoji|$location_str|$service_name|$node_name|$ip|$port" >> "$temp_file"
+                fi
+            done
+        fi
+    done
+    
+    # 获取IP总数
+    local total_ips
+    total_ips=$(wc -l < "$temp_file" 2>/dev/null || echo "0")
+    
+    if [ "$total_ips" -eq 0 ]; then
+        echo -e "${YELLOW}没有找到IP地址${NC}"
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    echo -e "${GREEN}共发现 $total_ips 个IP地址${NC}\n"
+    
+    # 显示表头
+    echo "=================================================================================================="
+    printf "%-5s | %-2s | %-15s | %-8s | %-30s | %-20s | %-15s\n" \
+        "序号" "国旗" "IP地址" "端口" "地理位置" "服务名称" "节点名称"
+    echo "=================================================================================================="
+    
+    # 显示每个IP的信息
+    local index=1
+    while IFS='|' read -r flag_emoji location_str service_name node_name ip port; do
+        printf "%-5s | %-2s | %-15s | %-8s | %-30s | %-20s | %-15s\n" \
+            "[$index]" \
+            "$flag_emoji" \
+            "$ip" \
+            "$port" \
+            "${location_str:0:28}" \
+            "${service_name:0:18}" \
+            "${node_name:0:13}"
+        
+        index=$((index + 1))
+    done < "$temp_file"
+    
+    echo ""
+    echo "$temp_file"
 }
 
 # 主菜单
@@ -360,73 +740,13 @@ show_menu() {
     echo "当前配置文件: $CONFIG_FILE"
     echo ""
     echo "请选择操作:"
-    echo "  1. 显示所有IP地址和地理位置"
-    echo "  2. 选择并替换IP地址"
-    echo "  3. 批量替换IP地址"
+    echo "  1. 查看所有IP（按地区分组）"
+    echo "  2. 查看所有IP（简单列表）"
+    echo "  3. 选择并替换IP地址"
     echo "  4. 退出"
     echo ""
     echo "================================================"
     echo -n "请输入选择 [1-4]: "
-}
-
-# 批量替换IP
-batch_replace_ips() {
-    echo -e "\n${YELLOW}=== 批量替换IP地址 ===${NC}"
-    echo ""
-    echo "批量替换格式: 每行一个IP映射，格式为 '旧IP,新IP'"
-    echo "例如:"
-    echo "  77.111.100.38,192.168.1.100"
-    echo "  213.210.5.23,192.168.1.101"
-    echo ""
-    
-    read -p "输入IP映射列表 (输入空行结束):"$'\n' ip_mappings
-    
-    if [ -z "$ip_mappings" ]; then
-        echo -e "${YELLOW}没有输入IP映射，操作取消${NC}"
-        return
-    fi
-    
-    # 创建备份
-    local backup_file="${CONFIG_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
-    cp "$CONFIG_FILE" "$backup_file"
-    echo -e "${GREEN}已创建备份: $backup_file${NC}"
-    
-    # 处理每对IP映射
-    local count=0
-    while IFS=',' read -r old_ip new_ip; do
-        # 跳过空行
-        [ -z "$old_ip" ] && continue
-        [ -z "$new_ip" ] && continue
-        
-        # 验证IP格式
-        if ! [[ "$old_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
-           ! [[ "$new_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo -e "${RED}✗ 跳过无效IP对: $old_ip -> $new_ip${NC}"
-            continue
-        fi
-        
-        echo -e "\n${YELLOW}处理: $old_ip -> $new_ip${NC}"
-        
-        # 查询新IP的地理位置
-        local location
-        location=$(get_ip_location "$new_ip")
-        echo -e "  新位置: $location"
-        
-        # 替换所有匹配的IP
-        if sed -i "s/\"$old_ip:/\"$new_ip:/g" "$CONFIG_FILE"; then
-            echo -e "${GREEN}✓ 替换成功${NC}"
-            count=$((count + 1))
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - 批量替换: $old_ip -> $new_ip" >> "$LOG_FILE"
-        else
-            echo -e "${RED}✗ 替换失败${NC}"
-        fi
-    done <<< "$ip_mappings"
-    
-    echo -e "\n${GREEN}批量替换完成! 共替换了 $count 个IP地址${NC}"
-    echo "备份文件: $backup_file"
-    
-    echo ""
-    read -p "按Enter键继续..."
 }
 
 # 主函数
@@ -451,15 +771,17 @@ main() {
         
         case $choice in
             1)
-                display_all_ips > /dev/null
+                display_all_ips_by_group > /dev/null
                 echo ""
                 read -p "按Enter键返回菜单..."
                 ;;
             2)
-                select_ip_to_replace
+                display_all_ips_simple > /dev/null
+                echo ""
+                read -p "按Enter键返回菜单..."
                 ;;
             3)
-                batch_replace_ips
+                select_ip_to_replace
                 ;;
             4)
                 echo -e "${GREEN}感谢使用，再见!${NC}"
