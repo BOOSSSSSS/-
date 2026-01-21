@@ -72,32 +72,36 @@ get_country_flag() {
     
     # 通过国家名称映射
     if [ -n "$country_name" ] && [ "$country_name" != "null" ] && [ "$country_name" != "N/A" ]; then
-        case "$country_name" in
-            *China*|*中国*|*china*)
+        # 将国家名称转换为小写以便比较
+        local country_lower=$(echo "$country_name" | tr '[:upper:]' '[:lower:]')
+        
+        # 使用case语句进行模式匹配
+        case "$country_lower" in
+            *china*|*中国*)
                 echo "🇨🇳"
                 ;;
-            *Taiwan*|*台湾*|*taiwan*)
+            *taiwan*|*台湾*)
                 echo "🇨🇳"  # 台湾地区显示中国国旗
                 ;;
-            *United States*|*美国*|*USA*|*US*)
+            *united*states*|*usa*|*us*|*美国*)
                 echo "🇺🇸"
                 ;;
-            *Japan*|*日本*|*japan*)
+            *japan*|*日本*)
                 echo "🇯🇵"
                 ;;
-            *Korea*|*韩国*|*korea*)
+            *korea*|*韩国*)
                 echo "🇰🇷"
                 ;;
-            *Germany*|*德国*|*germany*)
+            *germany*|*德国*)
                 echo "🇩🇪"
                 ;;
-            *France*|*法国*|*france*)
+            *france*|*法国*)
                 echo "🇫🇷"
                 ;;
-            *United Kingdom*|*英国*|*UK*|*Britain*)
+            *united*kingdom*|*uk*|*britain*|*英国*)
                 echo "🇬🇧"
                 ;;
-            *Russia*|*俄罗斯*|*russia*)
+            *russia*|*俄罗斯*)
                 echo "🇷🇺"
                 ;;
             *)
@@ -488,7 +492,7 @@ replace_single_ip() {
     echo ""
     read -p "确定要将 $old_ip 替换为 $new_ip 吗? (y/N): " confirm
     
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]; then
         echo -e "${YELLOW}操作已取消${NC}"
         return 0
     fi
